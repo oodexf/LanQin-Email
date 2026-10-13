@@ -64,6 +64,7 @@ import {
   IndentDecrease,
   IndentIncrease,
   Italic,
+  LayoutDashboard,
   Link,
   List,
   ListOrdered,
@@ -202,7 +203,7 @@ import { MailAttachment } from "@/components/mail-attachment"
 import { useMe } from "@/hooks/use-me"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useToast } from "@/hooks/use-toast"
-import { hasPermission } from "@/lib/permissions"
+import { hasAdminAccess, hasPermission } from "@/lib/permissions"
 
 const folderIcons: Record<string, React.ReactNode> = {
   inbox: <Inbox className="h-4 w-4" />,
@@ -1833,7 +1834,7 @@ export function MailPage() {
           email={me.data?.user.email || selectedMailbox?.address}
           darkMode={darkMode}
           onToggleTheme={() => setDarkMode((value) => !value)}
-
+          onAdmin={hasAdminAccess(me.data?.user) ? () => navigate("/admin") : undefined}
           onSettings={openSettings}
         />
         <div className={cn("mt-2 flex gap-2", sidebarCollapsed && "justify-center")}>
@@ -5162,6 +5163,7 @@ function AccountHeader({
   email,
   darkMode,
   onToggleTheme,
+  onAdmin,
   onSettings,
 }: {
   collapsed: boolean
@@ -5169,6 +5171,7 @@ function AccountHeader({
   email?: string
   darkMode: boolean
   onToggleTheme: () => void
+  onAdmin?: () => void
   onSettings: () => void
 }) {
   useUiLanguage()
@@ -5208,6 +5211,19 @@ function AccountHeader({
           {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </Button>
         <LanguageSelector />
+        {onAdmin && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8 rounded-md text-muted-foreground"
+            onClick={onAdmin}
+            aria-label={uiText("系统管理")}
+            title={uiText("系统管理")}
+          >
+            <LayoutDashboard className="h-4 w-4" />
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"
