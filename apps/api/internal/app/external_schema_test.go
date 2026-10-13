@@ -132,7 +132,7 @@ func TestLinuxDoExternalSchemaContract(t *testing.T) {
 			}
 		}
 	}
-	statements := linuxDoExternalSchemaStatements()
+	statements := externalSchemaV2Statements
 	if len(statements) != 6 {
 		t.Fatalf("v2 migration has %d statements, want 6", len(statements))
 	}
@@ -159,13 +159,17 @@ func TestRegistrationInviteExternalSchemaContract(t *testing.T) {
 			t.Errorf("%s registration invite schema is missing portable usage constraints", name)
 		}
 	}
-	statements := registrationInviteExternalSchemaStatements()
+	statements := externalSchemaV3Statements
 	if len(statements) != 2 {
 		t.Fatalf("v3 migration has %d statements, want 2", len(statements))
 	}
 	for _, statement := range statements {
 		if !strings.Contains(statement, "registration_invites") {
 			t.Errorf("v3 migration contains unrelated statement: %.80s", statement)
+		}
+		// V9 adds this column; creating it here as well breaks the V9 upgrade.
+		if strings.Contains(statement, "permission_group_ids_json") {
+			t.Errorf("v3 migration must create the v3 table, not the current one: %.80s", statement)
 		}
 	}
 }
@@ -189,13 +193,17 @@ func TestTelegramNotificationExternalSchemaContract(t *testing.T) {
 		}
 	}
 
-	statements := telegramNotificationExternalSchemaStatements()
+	statements := externalSchemaV4Statements
 	if len(statements) != 4 {
 		t.Fatalf("v4 migration has %d statements, want 4", len(statements))
 	}
 	for _, statement := range statements {
 		if !strings.Contains(statement, "telegram_notification_") {
 			t.Errorf("v4 migration contains unrelated statement: %.80s", statement)
+		}
+		// V6 adds the lease columns; creating them here as well breaks the V6 upgrade.
+		if strings.Contains(statement, "lease_") {
+			t.Errorf("v4 migration must create the v4 table, not the current one: %.80s", statement)
 		}
 	}
 }
@@ -218,7 +226,7 @@ func TestLoginRateLimitExternalSchemaContract(t *testing.T) {
 		}
 	}
 
-	statements := loginRateLimitExternalSchemaStatements()
+	statements := externalSchemaV5Statements
 	if len(statements) != 2 {
 		t.Fatalf("v5 migration has %d statements, want 2", len(statements))
 	}
@@ -254,7 +262,7 @@ func TestQueueLeaseExternalSchemaContract(t *testing.T) {
 		}
 	}
 
-	statements := queueLeaseExternalSchemaStatements()
+	statements := externalSchemaV6Statements
 	if len(statements) != 9 {
 		t.Fatalf("v6 migration has %d statements, want 9", len(statements))
 	}

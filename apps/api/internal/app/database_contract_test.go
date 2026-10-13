@@ -4,13 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func TestExternalDatabaseContract(t *testing.T) {
@@ -61,12 +66,13 @@ func TestExternalDatabaseContract(t *testing.T) {
 					assertPostgresConcurrentMailboxDailyQuota(t, a, false)
 				})
 			})
+			fresh := externalSchemaFingerprint(t, a.db, tt.driver)
 			if err := a.Close(); err != nil {
 				t.Fatalf("close first app: %v", err)
 			}
 
 			// Exercise a real V8 upgrade, not just a fresh-schema reopen.
-			prepareExternalSchemaV8Upgrade(t, cfg)
+			prepareExternalSchemaUpgrade(t, cfg, 8)
 			cfg.DataDir = filepath.Join(dataDir, "upgrade")
 			upgraded, err := New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 			if err != nil {
@@ -80,6 +86,43 @@ func TestExternalDatabaseContract(t *testing.T) {
 				}()
 				assertUpgradedInviteDefaults(t, upgraded)
 				assertExternalMailboxPushContract(t, upgraded)
+			})
+
+			// Every released schema version must upgrade to exactly the fresh schema.
+			// V1 to V4 used to fail: their checks expected tables added later, and
+			// their migrations created columns that V6 and V9 then added again.
+			for _, from := range []int{1, 2, 3, 4, 7} {
+				t.Run(fmt.Sprintf("upgrade from V%d", from), func(t *testing.T) {
+					prepareExternalSchemaUpgrade(t, cfg, from)
+					assertExternalSchemaUpgradeMatches(t, cfg, filepath.Join(dataDir, fmt.Sprintf("upgrade-v%d", from)), fresh)
+				})
+			}
+			t.Run("resume interrupted MySQL upgrade", func(t *testing.T) {
+				if tt.driver != databaseDriverMySQL {
+					t.Skip("PostgreSQL migrations are transactional")
+				}
+				// MySQL commits each DDL statement, so a crash in the middle of V9 leaves
+				// its table and column in place without the V9 marker.
+				prepareExternalSchemaUpgrade(t, cfg, 8)
+				db, err := openDatabase(t.Context(), cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, statement := range []string{
+					"ALTER TABLE registration_invites ADD COLUMN permission_group_ids_json LONGTEXT NOT NULL DEFAULT ('[]')",
+					postgresTableToMySQL(`CREATE TABLE mailbox_creation_events (
+						id VARCHAR(64) PRIMARY KEY,
+						user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+						mailbox_id VARCHAR(64) NOT NULL,
+						created_at VARCHAR(35) NOT NULL
+					)`),
+				} {
+					if _, err := db.ExecContext(t.Context(), statement); err != nil {
+						t.Fatalf("simulate partial V9: %v", err)
+					}
+				}
+				_ = db.Close()
+				assertExternalSchemaUpgradeMatches(t, cfg, filepath.Join(dataDir, "resume-v9"), fresh)
 			})
 
 			// Reopening validates upgrade idempotency and persisted seed data.
@@ -377,9 +420,13 @@ func assertExternalDeliveryCascade(t *testing.T, ctx context.Context, a *App, ad
 
 // The contract DSNs must point at dedicated test databases. Downgrade only the
 // post-V8 additions after closing the app so its workers cannot race the fixture.
-func prepareExternalSchemaV8Upgrade(t *testing.T, cfg Config) {
+// prepareExternalSchemaUpgrade turns a fresh database back into one at schema
+// version `from` by undoing, newest first, what each later migration added. The
+// result matches what the released code of that version created (checked against
+// databases initialized by the historical commits).
+func prepareExternalSchemaUpgrade(t *testing.T, cfg Config, from int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	db, err := openDatabase(ctx, cfg)
 	if err != nil {
@@ -389,30 +436,138 @@ func prepareExternalSchemaV8Upgrade(t *testing.T, cfg Config) {
 	indexSuffix := ""
 	if cfg.DBDriver == databaseDriverMySQL {
 		indexSuffix = " ON sessions"
-		// V8 had an implicit FK index. MySQL discarded it when the newer
-		// explicit index was added, so restore a supporting index first.
-		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_sessions_user_v8_fixture ON sessions(user_id)"); err != nil {
+	}
+	steps := []struct {
+		version    int
+		statements []string
+	}{
+		{12, []string{"DROP TABLE mailbox_push_requests", "DROP TABLE domain_collections", "DROP TABLE domain_collection_audit", "DROP TABLE local_delivery_jobs"}},
+		{11, []string{"ALTER TABLE smtp_send_events DROP COLUMN recipients"}},
+		{10, []string{"DROP INDEX idx_sessions_user" + indexSuffix, "DROP INDEX idx_sessions_expires" + indexSuffix, "ALTER TABLE users DROP COLUMN two_factor_last_counter"}},
+		{9, []string{"DROP TABLE mailbox_creation_events", "ALTER TABLE registration_invites DROP COLUMN permission_group_ids_json"}},
+		{8, []string{"ALTER TABLE users DROP COLUMN mailboxes_created_total", "ALTER TABLE users DROP COLUMN mailbox_quota_bonus"}},
+		{7, []string{"ALTER TABLE messages DROP COLUMN thread_id"}},
+		{6, []string{
+			"ALTER TABLE send_queue DROP COLUMN lease_owner", "ALTER TABLE send_queue DROP COLUMN lease_token", "ALTER TABLE send_queue DROP COLUMN lease_until",
+			"ALTER TABLE status_webhook_outbox DROP COLUMN lease_owner", "ALTER TABLE status_webhook_outbox DROP COLUMN lease_token", "ALTER TABLE status_webhook_outbox DROP COLUMN lease_until",
+			"ALTER TABLE telegram_notification_outbox DROP COLUMN lease_owner", "ALTER TABLE telegram_notification_outbox DROP COLUMN lease_token", "ALTER TABLE telegram_notification_outbox DROP COLUMN lease_until",
+		}},
+		{5, []string{"DROP TABLE login_rate_limits"}},
+		{4, []string{"DROP TABLE telegram_notification_outbox", "DROP TABLE telegram_notification_settings"}},
+		{3, []string{"DROP TABLE registration_invites"}},
+		{2, []string{"DROP TABLE oauth_identities", "DROP TABLE oauth_login_states", "DROP TABLE oauth_registration_challenges"}},
+	}
+	if from < 10 && cfg.DBDriver == databaseDriverMySQL {
+		// Before V10 the sessions FK was backed by an implicit index. MySQL discards
+		// that one once V10 adds idx_sessions_user, so restore a supporting index
+		// before dropping it; assertExternalSchemaUpgradeMatches removes it again.
+		if _, err := db.ExecContext(ctx, "DROP INDEX idx_sessions_user_fixture ON sessions"); err != nil && !isMySQLMissingIndex(err) {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, "CREATE INDEX idx_sessions_user_fixture ON sessions(user_id)"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	statements := []string{
-		"DROP TABLE mailbox_push_requests",
-		"DROP TABLE domain_collections",
-		"DROP TABLE domain_collection_audit",
-		"DROP TABLE local_delivery_jobs",
-		"DROP TABLE mailbox_creation_events",
-		"ALTER TABLE registration_invites DROP COLUMN permission_group_ids_json",
-		"DROP INDEX idx_sessions_user" + indexSuffix,
-		"DROP INDEX idx_sessions_expires" + indexSuffix,
-		"ALTER TABLE users DROP COLUMN two_factor_last_counter",
-		"ALTER TABLE smtp_send_events DROP COLUMN recipients",
-		"DELETE FROM schema_migrations WHERE version>=9",
-	}
-	for _, statement := range statements {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			t.Fatalf("prepare V8: %s: %v", statement, err)
+	for _, step := range steps {
+		if step.version <= from {
+			break
+		}
+		for _, statement := range step.statements {
+			if _, err := db.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("prepare V%d: %s: %v", from, statement, err)
+			}
 		}
 	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version>?", from); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertExternalSchemaUpgradeMatches starts the application on the prepared
+// database and requires the upgraded schema to equal the fresh one.
+func assertExternalSchemaUpgradeMatches(t *testing.T, cfg Config, dataDir string, fresh []string) {
+	t.Helper()
+	cfg.DataDir = dataDir
+	upgraded, err := New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("upgrade %s: %v", cfg.DBDriver, err)
+	}
+	defer upgraded.Close()
+	if cfg.DBDriver == databaseDriverMySQL {
+		if _, err := upgraded.db.ExecContext(t.Context(), "DROP INDEX idx_sessions_user_fixture ON sessions"); err != nil && !isMySQLMissingIndex(err) {
+			t.Fatal(err)
+		}
+	}
+	got := externalSchemaFingerprint(t, upgraded.db, cfg.DBDriver)
+	if strings.Join(got, "\n") != strings.Join(fresh, "\n") {
+		t.Fatalf("upgraded schema differs from a fresh one:\n%s", diffLines(got, fresh))
+	}
+}
+
+func isMySQLMissingIndex(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1091
+}
+
+// externalSchemaFingerprint describes columns, indexes and migration markers
+// without object names, which differ between CREATE TABLE and later ALTERs.
+func externalSchemaFingerprint(t *testing.T, db *sql.DB, driver string) []string {
+	t.Helper()
+	queries := []string{
+		`SELECT CONCAT('column ',table_name,'.',column_name,' ',data_type,' ',is_nullable,' ',COALESCE(column_default,'')) FROM information_schema.columns WHERE table_schema=current_schema()`,
+		`SELECT CONCAT('index ',tablename,' ',regexp_replace(indexdef,'^CREATE (UNIQUE )?INDEX \S+ ON \S+ ','\1')) FROM pg_indexes WHERE schemaname=current_schema()`,
+		`SELECT CONCAT('migration ',version,' ',name) FROM schema_migrations`,
+	}
+	if driver == databaseDriverMySQL {
+		queries = []string{
+			`SELECT CONCAT('column ',TABLE_NAME,'.',COLUMN_NAME,' ',COLUMN_TYPE,' ',IS_NULLABLE,' ',COALESCE(COLUMN_DEFAULT,''),' ',EXTRA) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()`,
+			`SELECT CONCAT('index ',TABLE_NAME,' ',IF(NON_UNIQUE=0,'UNIQUE ',''),GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX)) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() GROUP BY TABLE_NAME,INDEX_NAME,NON_UNIQUE`,
+			`SELECT CONCAT('migration ',version,' ',name) FROM schema_migrations`,
+		}
+	}
+	var out []string
+	for _, query := range queries {
+		rows, err := db.QueryContext(t.Context(), query)
+		if err != nil {
+			t.Fatalf("fingerprint schema: %v", err)
+		}
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, line)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+	}
+	sort.Strings(out)
+	return out
+}
+
+func diffLines(got, want []string) string {
+	inGot := map[string]bool{}
+	for _, line := range got {
+		inGot[line] = true
+	}
+	inWant := map[string]bool{}
+	for _, line := range want {
+		inWant[line] = true
+	}
+	var b strings.Builder
+	for _, line := range got {
+		if !inWant[line] {
+			b.WriteString("+ " + line + "\n")
+		}
+	}
+	for _, line := range want {
+		if !inGot[line] {
+			b.WriteString("- " + line + "\n")
+		}
+	}
+	return b.String()
 }
 
 func assertExternalMailboxPushContract(t *testing.T, a *App) {
