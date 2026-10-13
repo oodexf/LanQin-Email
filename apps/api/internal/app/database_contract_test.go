@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,6 +50,9 @@ func TestExternalDatabaseContract(t *testing.T) {
 			assertExternalDatabaseContract(t, a)
 			t.Run("mail access queries", func(t *testing.T) {
 				assertExternalMailAccessContract(t, a)
+			})
+			t.Run("concurrent folder IMAP counters", func(t *testing.T) {
+				assertConcurrentFolderIMAPCounters(t, a)
 			})
 			t.Run("concurrent mailbox daily quota", func(t *testing.T) {
 				if tt.driver != databaseDriverPostgres {
@@ -283,6 +287,10 @@ func assertExternalDatabaseContract(t *testing.T, a *App) {
 func TestSQLiteOAuthIdentityContract(t *testing.T) {
 	a := newTestApp(t)
 	assertOAuthIdentityContract(t, context.Background(), a)
+}
+
+func TestSQLiteFolderIMAPCountersContract(t *testing.T) {
+	assertConcurrentFolderIMAPCounters(t, newTestApp(t))
 }
 
 func TestSQLiteRegistrationInviteContract(t *testing.T) {
@@ -586,5 +594,96 @@ func assertPostgresConcurrentMailboxDailyQuota(t *testing.T, a *App, commitFirst
 	}
 	if total != 1 || events != 1 || mailboxes != 1 {
 		t.Errorf("daily limit=1: total=%d events=%d mailboxes=%d", total, events, mailboxes)
+	}
+}
+
+// assertConcurrentFolderIMAPCounters allocates UIDs and ModSeqs on one folder from
+// many goroutines at once, both inside caller transactions and on the bare pool,
+// and requires every value to be unique. Reading the counters before updating them
+// handed the same UID to most of the callers on PostgreSQL and MySQL.
+func assertConcurrentFolderIMAPCounters(t *testing.T, a *App) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	var mailboxID string
+	if err := a.db.QueryRowContext(ctx, "SELECT id FROM mailboxes ORDER BY created_at LIMIT 1").Scan(&mailboxID); err != nil {
+		t.Fatal(err)
+	}
+	folderID := newID("fld")
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.ExecContext(ctx, "INSERT INTO folders(id,mailbox_id,name,role,uid_validity,uid_next,highest_modseq,created_at) VALUES(?,?,?,'custom',1,1,1,?)", folderID, mailboxID, "Counter "+folderID, now); err != nil {
+		t.Fatal(err)
+	}
+	defer a.db.ExecContext(context.Background(), "DELETE FROM folders WHERE id=?", folderID)
+
+	const workers = 24
+	type result struct {
+		uid, modSeq int64
+		err         error
+	}
+	results := make(chan result, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			switch i % 3 {
+			case 0:
+				meta, err := a.nextIMAPMetadata(ctx, a.db, folderID)
+				results <- result{uid: meta.UID, modSeq: meta.ModSeq, err: err}
+			case 1:
+				tx, err := a.db.BeginTx(ctx, nil)
+				if err != nil {
+					results <- result{err: err}
+					return
+				}
+				defer tx.Rollback()
+				meta, err := a.nextIMAPMetadata(ctx, tx, folderID)
+				if err == nil {
+					err = tx.Commit()
+				}
+				results <- result{uid: meta.UID, modSeq: meta.ModSeq, err: err}
+			default:
+				modSeq, err := a.bumpFolderModSeq(ctx, folderID)
+				results <- result{modSeq: modSeq, err: err}
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	uids := map[int64]bool{}
+	modSeqs := map[int64]bool{}
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("allocate folder counters: %v", r.err)
+		}
+		if r.modSeq <= 1 || modSeqs[r.modSeq] {
+			t.Fatalf("modseq %d is not a fresh value; seen %v", r.modSeq, modSeqs)
+		}
+		modSeqs[r.modSeq] = true
+		if r.uid == 0 {
+			continue
+		}
+		if uids[r.uid] {
+			t.Fatalf("uid %d allocated twice; seen %v", r.uid, uids)
+		}
+		uids[r.uid] = true
+	}
+	allocations := workers * 2 / 3
+	for uid := int64(1); uid <= int64(allocations); uid++ {
+		if !uids[uid] {
+			t.Fatalf("uid %d missing from %v", uid, uids)
+		}
+	}
+	var uidNext, highest int64
+	if err := a.db.QueryRowContext(ctx, "SELECT uid_next,highest_modseq FROM folders WHERE id=?", folderID).Scan(&uidNext, &highest); err != nil {
+		t.Fatal(err)
+	}
+	if uidNext != int64(allocations)+1 || highest != int64(workers)+1 {
+		t.Fatalf("folder counters = uid_next %d, highest_modseq %d; want %d, %d", uidNext, highest, allocations+1, workers+1)
 	}
 }
