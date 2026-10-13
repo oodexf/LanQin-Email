@@ -91,3 +91,39 @@ func TestSQLDialectAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestGroupConcatSQL(t *testing.T) {
+	tests := []struct {
+		driver string
+		want   string
+	}{
+		{driver: databaseDriverSQLite, want: `GROUP_CONCAT(mb.address)`},
+		{driver: databaseDriverMySQL, want: `GROUP_CONCAT(mb.address)`},
+		{driver: databaseDriverPostgres, want: `string_agg(mb.address, ',')`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.driver, func(t *testing.T) {
+			if got := groupConcatSQL(tt.driver, "mb.address"); got != tt.want {
+				t.Fatalf("groupConcatSQL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConcatSQL(t *testing.T) {
+	parts := []string{"from_addr", "' '", "COALESCE(from_name,'')"}
+	for _, driver := range []string{databaseDriverSQLite, databaseDriverPostgres} {
+		if got, want := concatSQL(driver, parts...), `from_addr || ' ' || COALESCE(from_name,'')`; got != want {
+			t.Fatalf("concatSQL(%q) = %q, want %q", driver, got, want)
+		}
+	}
+	if got, want := concatSQL(databaseDriverMySQL, parts...), `CONCAT(from_addr,' ',COALESCE(from_name,''))`; got != want {
+		t.Fatalf("concatSQL(mysql) = %q, want %q", got, want)
+	}
+}
+
+func TestEscapeLike(t *testing.T) {
+	if got, want := escapeLike(`a_b%c!d\e`), `a!_b!%c!!d\e`; got != want {
+		t.Fatalf("escapeLike() = %q, want %q", got, want)
+	}
+}

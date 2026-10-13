@@ -27,6 +27,24 @@ func scalarMaxSQL(driver, left, right string) string {
 	return "GREATEST(" + left + "," + right + ")"
 }
 
+// groupConcatSQL aggregates expr into a comma-separated string. SQLite and MySQL
+// provide GROUP_CONCAT; PostgreSQL only has string_agg.
+func groupConcatSQL(driver, expr string) string {
+	if sqlDialect(driver) == databaseDriverPostgres {
+		return "string_agg(" + expr + ", ',')"
+	}
+	return "GROUP_CONCAT(" + expr + ")"
+}
+
+// concatSQL joins string expressions. MySQL treats || as logical OR unless
+// PIPES_AS_CONCAT is enabled, so it needs CONCAT().
+func concatSQL(driver string, parts ...string) string {
+	if sqlDialect(driver) == databaseDriverMySQL {
+		return "CONCAT(" + strings.Join(parts, ",") + ")"
+	}
+	return strings.Join(parts, " || ")
+}
+
 func permissionGroupRenameSQL(driver string) string {
 	if sqlDialect(driver) == databaseDriverMySQL {
 		return `UPDATE permission_groups SET name=CONCAT(name,' (',id,')') WHERE name=? AND id<>?`

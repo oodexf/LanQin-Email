@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,11 +30,13 @@ func TestExternalDatabaseContract(t *testing.T) {
 			}
 			dataDir := t.TempDir()
 			cfg := Config{
-				DBDriver:      tt.driver,
-				DBDSN:         dsn,
-				DataDir:       dataDir,
-				AdminEmail:    "admin@contract.test",
-				AdminPassword: "ContractPassword123!",
+				DBDriver:        tt.driver,
+				DBDSN:           dsn,
+				DataDir:         dataDir,
+				AdminEmail:      "admin@contract.test",
+				AdminPassword:   "ContractPassword123!",
+				CookieName:      "lanqin_session",
+				SessionTTLHours: 1,
 			}
 
 			a, err := New(cfg, slog.New(slog.NewTextHandler(os.Stderr, nil)))
@@ -43,6 +47,9 @@ func TestExternalDatabaseContract(t *testing.T) {
 				t.Fatal("external database must use the portable search fallback")
 			}
 			assertExternalDatabaseContract(t, a)
+			t.Run("mail access queries", func(t *testing.T) {
+				assertExternalMailAccessContract(t, a)
+			})
 			t.Run("concurrent mailbox daily quota", func(t *testing.T) {
 				if tt.driver != databaseDriverPostgres {
 					t.Skip("PostgreSQL statement-snapshot regression")
@@ -91,6 +98,114 @@ func TestExternalDatabaseContract(t *testing.T) {
 	}
 }
 
+// assertExternalMailAccessContract drives the mailbox list, user admin and
+// mailbox sharing paths over HTTP so dialect-specific SQL (aggregates, LIKE
+// escapes, bool parameters, string concatenation) runs on the external server.
+func assertExternalMailAccessContract(t *testing.T, a *App) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ts := httptest.NewServer(a.Router())
+	defer ts.Close()
+
+	admin := &testClient{t: t, server: ts}
+	if code := admin.do("POST", "/api/auth/login", map[string]string{"email": a.cfg.AdminEmail, "password": a.cfg.AdminPassword}, nil); code != http.StatusOK {
+		t.Fatalf("admin login code=%d", code)
+	}
+	var users struct {
+		Items []AdminUser `json:"items"`
+	}
+	if code := admin.do("GET", "/api/admin/users", nil, &users); code != http.StatusOK || len(users.Items) == 0 {
+		t.Fatalf("admin users code=%d items=%+v", code, users.Items)
+	}
+	for _, path := range []string{"/api/mail/mailboxes", "/api/mail/mailboxes?owned=1"} {
+		var mailboxes struct {
+			Items []Mailbox `json:"items"`
+		}
+		if code := admin.do("GET", path, nil, &mailboxes); code != http.StatusOK || len(mailboxes.Items) == 0 {
+			t.Fatalf("GET %s code=%d items=%+v", path, code, mailboxes.Items)
+		}
+	}
+	var domains struct {
+		Items []Domain `json:"items"`
+	}
+	if code := admin.do("GET", "/api/admin/domains", nil, &domains); code != http.StatusOK || len(domains.Items) == 0 {
+		t.Fatalf("domains code=%d items=%+v", code, domains.Items)
+	}
+	ownerMailbox := createTestMailbox(t, admin, domains.Items[0].ID, "share-owner", "Share Owner", "Password123!", nil)
+	targetMailbox := createTestMailbox(t, admin, domains.Items[0].ID, "share-target", "Share Target", "Password123!", nil)
+
+	owner := &testClient{t: t, server: ts}
+	if code := owner.do("POST", "/api/auth/login", map[string]string{"email": ownerMailbox.Address, "password": "Password123!"}, nil); code != http.StatusOK {
+		t.Fatalf("owner login code=%d", code)
+	}
+	var shareUsers struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if code := owner.do("GET", "/api/me/share-users?q=share-target", nil, &shareUsers); code != http.StatusOK || len(shareUsers.Items) != 1 || shareUsers.Items[0].ID != targetMailbox.UserID {
+		t.Fatalf("share user search code=%d items=%+v", code, shareUsers.Items)
+	}
+	// The underscore must match literally rather than as a LIKE wildcard.
+	if code := owner.do("GET", "/api/me/share-users?q=share_target", nil, &shareUsers); code != http.StatusOK || len(shareUsers.Items) != 0 {
+		t.Fatalf("escaped share user search code=%d items=%+v", code, shareUsers.Items)
+	}
+	var share MailboxShare
+	if code := owner.do("POST", "/api/me/mailbox-shares", map[string]any{
+		"mailboxId": ownerMailbox.ID, "sharedWithUserId": targetMailbox.UserID, "scope": "custom",
+		"folderIds": []string{}, "labelIds": []string{}, "includeStarred": true, "allowAttachments": false, "expiresInDays": 0,
+	}, &share); code != http.StatusCreated || !share.IncludeStarred || share.AllowAttachments {
+		t.Fatalf("create share code=%d share=%+v", code, share)
+	}
+	if code := owner.do("POST", "/api/me/mailbox-shares/"+share.ID, map[string]any{
+		"scope": "custom", "folderIds": []string{}, "labelIds": []string{}, "includeStarred": true, "allowAttachments": true, "version": share.Version,
+	}, &share); code != http.StatusOK || !share.AllowAttachments {
+		t.Fatalf("update share code=%d share=%+v", code, share)
+	}
+
+	target := &testClient{t: t, server: ts}
+	if code := target.do("POST", "/api/auth/login", map[string]string{"email": targetMailbox.Address, "password": "Password123!"}, nil); code != http.StatusOK {
+		t.Fatalf("target login code=%d", code)
+	}
+	var targetMailboxes struct {
+		Items []Mailbox `json:"items"`
+	}
+	if code := target.do("GET", "/api/mail/mailboxes", nil, &targetMailboxes); code != http.StatusOK {
+		t.Fatalf("target mailboxes code=%d", code)
+	}
+	foundShared := false
+	for _, mailbox := range targetMailboxes.Items {
+		foundShared = foundShared || (mailbox.ID == ownerMailbox.ID && mailbox.Access == "read" && mailbox.ShareIncludesStarred)
+	}
+	if !foundShared {
+		t.Fatalf("shared mailbox missing: %+v", targetMailboxes.Items)
+	}
+
+	folderID, err := a.ensureFolder(ctx, ownerMailbox.ID, "Inbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	messageID := newID("msg")
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO messages(id,mailbox_id,folder_id,recipient_addr,message_uid,message_id,subject,from_addr,from_name,to_addrs,cc_addrs,bcc_addrs,sent_at,received_at,snippet,body_text,body_html,is_read,is_starred,has_attachments,size_bytes,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, messageID, ownerMailbox.ID, folderID, ownerMailbox.Address, newID("uid"), "<contract@example.test>", "starred", "sender@example.test", "Sender", "[]", "[]", "[]", now, now, "", "", "", 0, 1, 0, 0, now, now); err != nil {
+		t.Fatal(err)
+	}
+	mb, err := a.mailboxByID(ctx, ownerMailbox.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access := &mailboxReadAccess{Mailbox: mb, ShareID: share.ID, Scope: "custom", IncludeStarred: true}
+	if !a.mailboxShareCanReadMessage(ctx, access, messageID) {
+		t.Fatal("starred message should be readable through an includeStarred share")
+	}
+	msg, ok := a.ruleMessageByID(ctx, messageID)
+	if !ok || msg.From != "sender@example.test Sender" {
+		t.Fatalf("rule message from = %q ok=%v", msg.From, ok)
+	}
+}
+
 func assertExternalDatabaseContract(t *testing.T, a *App) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -105,6 +220,18 @@ func assertExternalDatabaseContract(t *testing.T, a *App) {
 		VALUES(?,?,?,?,?,?,?,?)`, newID("usr"), a.cfg.AdminEmail, "Duplicate", "user", "unused", 0, now, now)
 	if !isUniqueViolation(err) {
 		t.Fatalf("duplicate email error=%v, want unique violation", err)
+	}
+	adminUser, err := a.adminUserByID(ctx, adminID)
+	if err != nil {
+		t.Fatalf("load administrator with mailbox aggregate: %v", err)
+	}
+	if adminUser.MailboxCount != 1 || len(adminUser.Mailboxes) != 1 || adminUser.Mailboxes[0] != a.cfg.AdminEmail {
+		t.Fatalf("administrator mailboxes = %d %v, want [%s]", adminUser.MailboxCount, adminUser.Mailboxes, a.cfg.AdminEmail)
+	}
+	listRec := httptest.NewRecorder()
+	a.handleListUsers(listRec, httptest.NewRequest(http.MethodGet, "/api/admin/users", nil).WithContext(ctx))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list users status = %d body=%s", listRec.Code, listRec.Body.String())
 	}
 	template, err := a.mailTemplate(ctx, smtpTestTemplateKey)
 	if err != nil || template.Key != smtpTestTemplateKey {

@@ -26,6 +26,7 @@ import {
   Info,
   KeyRound,
   Laptop,
+  LayoutDashboard,
   Link2,
   LogOut,
   Mail,
@@ -85,7 +86,7 @@ import { useMe } from "@/hooks/use-me"
 import { useLogout } from "@/hooks/use-logout"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { validatePasswordConfirm } from "@/lib/validation"
-import { hasPermission } from "@/lib/permissions"
+import { hasAdminAccess, hasPermission } from "@/lib/permissions"
 import { Button } from "@/components/ui/button"
 import { PasswordInput } from "@/components/ui/password-input"
 import { Input } from "@/components/ui/input"
@@ -794,6 +795,20 @@ export function ProfilePage() {
       <div
         className={cn("mt-auto border-t p-2", sidebarCollapsed ? "flex flex-col items-center" : "")}
       >
+        {hasAdminAccess(user) && (
+          <Button
+            type="button"
+            variant="ghost"
+            size={sidebarCollapsed ? "icon" : "sm"}
+            className={cn("text-muted-foreground", !sidebarCollapsed && "w-full justify-start")}
+            onClick={() => navigate("/admin")}
+            aria-label={uiText("系统管理")}
+            title={sidebarCollapsed ? uiText("系统管理") : undefined}
+          >
+            <LayoutDashboard className="h-4 w-4" />
+            {!sidebarCollapsed && <span>{uiText("系统管理")}</span>}
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"
