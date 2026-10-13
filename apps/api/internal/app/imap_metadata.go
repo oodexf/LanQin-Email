@@ -3,7 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
-	"math"
+	"errors"
 	"time"
 )
 
@@ -178,61 +178,83 @@ func (a *App) newUIDValidity() int64 {
 	return value
 }
 
+// nextIMAPMetadata allocates the next UID and ModSeq of a folder. The counters
+// are advanced by a single UPDATE before they are read back: the UPDATE takes the
+// folder row lock, so concurrent allocators queue behind it instead of all reading
+// the same uid_next and handing out duplicate UIDs. The read must stay in the same
+// transaction as the UPDATE, so a plain *sql.DB is wrapped in a short one.
 func (a *App) nextIMAPMetadata(ctx context.Context, db dbExecutor, folderID string) (imapMetadata, error) {
 	if folderID == "" {
 		return imapMetadata{}, nil
 	}
-	rowDB, ok := db.(dbQueryer)
-	if !ok {
-		return imapMetadata{}, nil
-	}
-	var nextUID, highestModSeq int64
-	err := rowDB.QueryRowContext(ctx, `SELECT uid_next,highest_modseq FROM folders WHERE id=?`, folderID).Scan(&nextUID, &highestModSeq)
+	var meta imapMetadata
+	err := withFolderCounterTx(ctx, db, func(tx folderCounterDB) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE folders SET uid_next=CASE WHEN uid_next<1 THEN 2 ELSE uid_next+1 END,highest_modseq=CASE WHEN highest_modseq<0 THEN 1 ELSE highest_modseq+1 END WHERE id=?`, folderID); err != nil {
+			return err
+		}
+		var uidNext int64
+		if err := tx.QueryRowContext(ctx, `SELECT uid_next,highest_modseq FROM folders WHERE id=?`, folderID).Scan(&uidNext, &meta.ModSeq); err != nil {
+			return err
+		}
+		meta.UID = uidNext - 1
+		return nil
+	})
 	if err != nil {
 		return imapMetadata{}, err
 	}
-	if nextUID < 1 {
-		nextUID = 1
-	}
-	nextModSeq := highestModSeq + 1
-	if nextModSeq < 1 {
-		nextModSeq = 1
-	}
-	query := `UPDATE folders SET uid_next=?,highest_modseq=` + scalarMaxSQL(a.cfg.DBDriver, "highest_modseq", "?") + ` WHERE id=?`
-	if _, err := db.ExecContext(ctx, query, nextUID+1, nextModSeq, folderID); err != nil {
-		return imapMetadata{}, err
-	}
-	return imapMetadata{UID: nextUID, ModSeq: nextModSeq}, nil
+	return meta, nil
 }
 
 func (a *App) bumpFolderModSeq(ctx context.Context, folderID string) (int64, error) {
 	return a.bumpFolderModSeqWithDB(ctx, a.db, folderID)
 }
 
+// bumpFolderModSeqWithDB advances a folder's highest_modseq atomically; see
+// nextIMAPMetadata for why the increment happens before the read.
 func (a *App) bumpFolderModSeqWithDB(ctx context.Context, db dbExecutor, folderID string) (int64, error) {
 	if folderID == "" {
 		return 0, nil
 	}
-	rowDB, ok := db.(dbQueryer)
-	if !ok {
+	var next int64
+	err := withFolderCounterTx(ctx, db, func(tx folderCounterDB) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE folders SET highest_modseq=CASE WHEN highest_modseq<0 THEN highest_modseq ELSE highest_modseq+1 END WHERE id=?`, folderID); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, `SELECT highest_modseq FROM folders WHERE id=?`, folderID).Scan(&next)
+	})
+	if err == sql.ErrNoRows {
 		return 0, nil
 	}
-	var current int64
-	if err := rowDB.QueryRowContext(ctx, `SELECT highest_modseq FROM folders WHERE id=?`, folderID).Scan(&current); err != nil {
-		if err == sql.ErrNoRows {
-			return 0, nil
-		}
-		return 0, err
-	}
-	next := current + 1
-	if next < 1 || next == math.MaxInt64 {
-		next = current
-	}
-	query := `UPDATE folders SET highest_modseq=` + scalarMaxSQL(a.cfg.DBDriver, "highest_modseq", "?") + ` WHERE id=?`
-	if _, err := db.ExecContext(ctx, query, next, folderID); err != nil {
+	if err != nil {
 		return 0, err
 	}
 	return next, nil
+}
+
+type folderCounterDB interface {
+	dbExecutor
+	dbQueryer
+}
+
+// withFolderCounterTx runs fn inside a transaction. A caller that already passes
+// a transaction keeps it, so the folder row stays locked until that caller commits.
+func withFolderCounterTx(ctx context.Context, db dbExecutor, fn func(folderCounterDB) error) error {
+	if sqlDB, ok := db.(*sql.DB); ok {
+		tx, err := sqlDB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	counterDB, ok := db.(folderCounterDB)
+	if !ok {
+		return errors.New("folder counters require a queryable database handle")
+	}
+	return fn(counterDB)
 }
 
 func (a *App) touchMessageIMAPModSeq(ctx context.Context, messageID string) error {
