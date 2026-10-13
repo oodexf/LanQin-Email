@@ -95,7 +95,7 @@ func (a *App) handleMyMailboxes(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN mailbox_shares ms ON ms.mailbox_id=mb.id AND ms.owner_user_id=mb.user_id AND ms.shared_with_user_id=?
 			AND ms.revoked_at IS NULL AND ms.left_at IS NULL AND (ms.expires_at IS NULL OR ms.expires_at>?)
 		WHERE (mb.user_id=? OR (?=0 AND ms.id IS NOT NULL)) AND mb.status='active' AND d.status='active'
-		ORDER BY CASE WHEN mb.user_id=? THEN 0 ELSE 1 END,mb.address`, user.ID, user.ID, user.ID, a.now().UTC().Format(time.RFC3339Nano), user.ID, ownedOnly, user.ID)
+		ORDER BY CASE WHEN mb.user_id=? THEN 0 ELSE 1 END,mb.address`, user.ID, user.ID, user.ID, a.now().UTC().Format(time.RFC3339Nano), user.ID, boolInt(ownedOnly), user.ID)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to load mailboxes")
 		return

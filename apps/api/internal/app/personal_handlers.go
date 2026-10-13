@@ -988,7 +988,7 @@ type ruleMessage struct {
 func (a *App) ruleMessageByID(ctx context.Context, messageID string) (ruleMessage, bool) {
 	var msg ruleMessage
 	var toAddrs, ccAddrs, receivedAt string
-	err := a.db.QueryRowContext(ctx, `SELECT id,COALESCE(mailbox_id,''),trim(from_addr || ' ' || COALESCE(from_name,'')),to_addrs,cc_addrs,subject,snippet,body_text,size_bytes,received_at FROM messages WHERE id=?`, messageID).
+	err := a.db.QueryRowContext(ctx, `SELECT id,COALESCE(mailbox_id,''),trim(`+concatSQL(a.cfg.DBDriver, "from_addr", "' '", "COALESCE(from_name,'')")+`),to_addrs,cc_addrs,subject,snippet,body_text,size_bytes,received_at FROM messages WHERE id=?`, messageID).
 		Scan(&msg.ID, &msg.MailboxID, &msg.From, &toAddrs, &ccAddrs, &msg.Subject, &msg.Snippet, &msg.BodyText, &msg.SizeBytes, &receivedAt)
 	if err != nil {
 		return ruleMessage{}, false

@@ -49,7 +49,7 @@ func (a *App) handleSearchShareUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	like := "%" + escapeLike(strings.ToLower(query)) + "%"
 	rows, err := a.db.QueryContext(r.Context(), `SELECT id,email,display_name FROM users
-		WHERE id<>? AND disabled=0 AND (lower(email) LIKE ? ESCAPE '\' OR lower(display_name) LIKE ? ESCAPE '\')
+		WHERE id<>? AND disabled=0 AND (lower(email) LIKE ? ESCAPE '!' OR lower(display_name) LIKE ? ESCAPE '!')
 		ORDER BY display_name,email LIMIT 10`, user.ID, like, like)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to search users")
@@ -197,7 +197,7 @@ func (a *App) handleCreateMailboxShare(w http.ResponseWriter, r *http.Request) {
 		}
 		id = existingID
 		if _, err = tx.ExecContext(r.Context(), `UPDATE mailbox_shares SET scope=?,include_starred=?,allow_attachments=?,expires_at=?,last_accessed_at=NULL,
-			revoked_at=NULL,left_at=NULL,version=version+1,updated_at=? WHERE id=?`, req.Scope, req.IncludeStarred, allowAttachments, *expiresAt, stamp, id); err != nil {
+			revoked_at=NULL,left_at=NULL,version=version+1,updated_at=? WHERE id=?`, req.Scope, boolInt(req.IncludeStarred), boolInt(allowAttachments), *expiresAt, stamp, id); err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to restore mailbox share")
 			return
 		}
@@ -206,7 +206,7 @@ func (a *App) handleCreateMailboxShare(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if errors.Is(err, sql.ErrNoRows) {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO mailbox_shares(id,mailbox_id,owner_user_id,shared_with_user_id,scope,include_starred,allow_attachments,version,expires_at,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, mb.ID, currentUser(r).ID, target.ID, req.Scope, req.IncludeStarred, allowAttachments, 1, *expiresAt, stamp, stamp)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, mb.ID, currentUser(r).ID, target.ID, req.Scope, boolInt(req.IncludeStarred), boolInt(allowAttachments), 1, *expiresAt, stamp, stamp)
 	}
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to create mailbox share")
@@ -277,10 +277,10 @@ func (a *App) handleUpdateMailboxShare(w http.ResponseWriter, r *http.Request) {
 	var result sql.Result
 	if expiresAt == nil {
 		result, err = tx.ExecContext(r.Context(), `UPDATE mailbox_shares SET scope=?,include_starred=?,allow_attachments=?,revoked_at=NULL,left_at=NULL,version=version+1,updated_at=?
-			WHERE id=? AND owner_user_id=? AND mailbox_id=? AND version=?`, req.Scope, req.IncludeStarred, allowAttachments, stamp, id, user.ID, mb.ID, req.Version)
+			WHERE id=? AND owner_user_id=? AND mailbox_id=? AND version=?`, req.Scope, boolInt(req.IncludeStarred), boolInt(allowAttachments), stamp, id, user.ID, mb.ID, req.Version)
 	} else {
 		result, err = tx.ExecContext(r.Context(), `UPDATE mailbox_shares SET scope=?,include_starred=?,allow_attachments=?,expires_at=?,revoked_at=NULL,left_at=NULL,version=version+1,updated_at=?
-			WHERE id=? AND owner_user_id=? AND mailbox_id=? AND version=?`, req.Scope, req.IncludeStarred, allowAttachments, *expiresAt, stamp, id, user.ID, mb.ID, req.Version)
+			WHERE id=? AND owner_user_id=? AND mailbox_id=? AND version=?`, req.Scope, boolInt(req.IncludeStarred), boolInt(allowAttachments), *expiresAt, stamp, id, user.ID, mb.ID, req.Version)
 	}
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to update mailbox share")
@@ -546,7 +546,7 @@ func (a *App) mailboxShareCanReadMessage(ctx context.Context, access *mailboxRea
 			EXISTS (SELECT 1 FROM mailbox_share_folders msf WHERE msf.share_id=? AND msf.folder_id=m.folder_id)
 			OR EXISTS (SELECT 1 FROM message_labels ml JOIN mailbox_share_labels msl ON msl.label_id=ml.label_id WHERE ml.message_id=m.id AND msl.share_id=?)
 			OR (?=1 AND m.is_starred=1)
-		)`, messageID, access.Mailbox.ID, access.ShareID, access.ShareID, access.IncludeStarred).Scan(&count)
+		)`, messageID, access.Mailbox.ID, access.ShareID, access.ShareID, boolInt(access.IncludeStarred)).Scan(&count)
 	return count > 0
 }
 
@@ -840,8 +840,10 @@ func uniqueNonEmpty(values []string) []string {
 	return out
 }
 
+// escapeLike escapes LIKE wildcards for use with ESCAPE '!'. A backslash escape
+// character is not portable: MySQL treats '\' as an unterminated string literal.
 func escapeLike(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	value = strings.ReplaceAll(value, `%`, `\%`)
-	return strings.ReplaceAll(value, `_`, `\_`)
+	value = strings.ReplaceAll(value, `!`, `!!`)
+	value = strings.ReplaceAll(value, `%`, `!%`)
+	return strings.ReplaceAll(value, `_`, `!_`)
 }

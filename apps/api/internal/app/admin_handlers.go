@@ -48,7 +48,7 @@ func (a *App) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.QueryContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at,COUNT(mb.id),COALESCE(GROUP_CONCAT(mb.address), '')
+	rows, err := a.db.QueryContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at,COUNT(mb.id),COALESCE(`+groupConcatSQL(a.cfg.DBDriver, "mb.address")+`, '')
 		FROM users u LEFT JOIN mailboxes mb ON mb.user_id=u.id
 		GROUP BY u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at
 		ORDER BY u.created_at DESC`)
@@ -1142,7 +1142,7 @@ func (a *App) domainByID(ctx context.Context, id string) (*Domain, error) {
 }
 
 func (a *App) adminUserByID(ctx context.Context, id string) (*AdminUser, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at,COUNT(mb.id),COALESCE(GROUP_CONCAT(mb.address), '')
+	row := a.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at,COUNT(mb.id),COALESCE(`+groupConcatSQL(a.cfg.DBDriver, "mb.address")+`, '')
 		FROM users u LEFT JOIN mailboxes mb ON mb.user_id=u.id
 		WHERE u.id=?
 		GROUP BY u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at`, id)
