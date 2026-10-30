@@ -142,10 +142,9 @@ type PermissionLimits struct {
 	SMTPMinuteLimit int `json:"smtpMinuteLimit"`
 	IMAPMinuteLimit int `json:"imapMinuteLimit"`
 	POP3MinuteLimit int `json:"pop3MinuteLimit"`
-	// MaxMailboxes limits how many mailboxes a user may create over their
-	// lifetime. Like every other field here, 0 means unlimited. The count is
-	// cumulative and includes deleted mailboxes, so deleting a mailbox does not
-	// free up quota; see users.mailboxes_created_total.
+	// MaxMailboxes limits currently owned mailboxes, including disabled ones.
+	// Like every other field here, 0 means unlimited. Deletion or reassignment
+	// frees up allowance; the lifetime creation counter is not quota usage.
 	MaxMailboxes int `json:"maxMailboxes"`
 	// MaxMailboxesPerDay caps creations within a rolling 24 hour window and
 	// applies on top of MaxMailboxes, so both must pass. Unused allowance does
@@ -287,8 +286,8 @@ func attachmentLimitBytes(limits PermissionLimits) int64 {
 	return int64(limits.MaxAttachmentMB) * 1024 * 1024
 }
 
-// effectiveMailboxLimit returns how many mailboxes the user may create in
-// total, or 0 when unlimited. The per-user bonus earned through quota
+// effectiveMailboxLimit returns how many mailboxes the user may own at once,
+// or 0 when unlimited. The per-user bonus earned through quota
 // redemption codes is added on top of the group limit, but only when the group
 // limit is finite: 0 already means unlimited, so adding a bonus to it would
 // turn "unlimited" into a finite number.
@@ -359,7 +358,7 @@ var permissionCatalogItems = []PermissionInfo{
 	{Key: PermissionDNSCheck, Label: "执行 DNS 检测", Description: "触发 MX、SPF、DKIM、DMARC 检测。", Category: "DNS"},
 
 	{Key: PermissionMailboxesView, Label: "查看邮箱账号", Description: "查看邮箱账号列表和归属用户。", Category: "邮箱账号"},
-	{Key: PermissionMailboxesCreate, Label: "创建邮箱账号", Description: "创建邮箱账号并准备归属用户。", Category: "邮箱账号"},
+	{Key: PermissionMailboxesCreate, Label: "添加邮箱", Description: "为已有用户添加邮箱。", Category: "邮箱账号"},
 	{Key: PermissionMailboxesUpdate, Label: "编辑邮箱账号", Description: "修改邮箱归属、显示名、配额和状态。", Category: "邮箱账号"},
 	{Key: PermissionMailboxesDelete, Label: "删除邮箱账号", Description: "删除邮箱账号及关联邮件文件。", Category: "邮箱账号"},
 
@@ -655,9 +654,8 @@ func (a *App) attachUserAuthorization(ctx context.Context, u *User) error {
 	u.Limits = authorization.Limits
 	u.PermissionGroupIDs = authorization.GroupIDs
 	u.PermissionGroups = authorization.Groups
-	// The mailbox counters live on users rather than in limits_json because
-	// they are per-user, not per-group. Loading them here keeps every
-	// authentication path (session cookie, API token, SSO) in sync without
+	// Mailbox usage and counters are per-user, not per-group. Loading them here
+	// keeps every authentication path (session cookie, API token, SSO) in sync without
 	// touching each individual users SELECT.
 	if err := a.attachMailboxQuotaCounters(ctx, u); err != nil {
 		return err
@@ -677,10 +675,11 @@ type userAuthorization struct {
 // are tolerated so that callers holding a user struct for an already-deleted
 // account do not fail authorization with a confusing error.
 func (a *App) attachMailboxQuotaCounters(ctx context.Context, u *User) error {
-	var createdTotal, bonus int
+	var createdTotal, bonus, count int
 	err := a.db.QueryRowContext(ctx,
-		`SELECT mailboxes_created_total, mailbox_quota_bonus FROM users WHERE id=?`, u.ID).
-		Scan(&createdTotal, &bonus)
+		`SELECT mailboxes_created_total, mailbox_quota_bonus,
+		(SELECT COUNT(*) FROM mailboxes WHERE user_id=users.id) FROM users WHERE id=?`, u.ID).
+		Scan(&createdTotal, &bonus, &count)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -688,6 +687,7 @@ func (a *App) attachMailboxQuotaCounters(ctx context.Context, u *User) error {
 		return err
 	}
 	u.MailboxesCreatedTotal = createdTotal
+	u.MailboxCount = count
 	u.MailboxQuotaBonus = bonus
 	return nil
 }
@@ -703,15 +703,20 @@ func (a *App) authorizationForUser(ctx context.Context, userID, role string) (us
 	}
 
 	seen := map[string]bool{}
-	limits := defaultPermissionLimits()
-	groups := []PermissionGroupSummary{{ID: PermissionGroupRegular, Name: "普通用户"}}
+	limits := minimalLimits()
+	groups := []PermissionGroupSummary{}
 	rows, err := a.db.QueryContext(ctx, `SELECT pg.id,pg.name,pg.permissions_json,pg.limits_json
 		FROM permission_groups pg WHERE pg.id=?
+		AND NOT EXISTS (
+			SELECT 1 FROM user_permission_groups upg
+			JOIN permission_groups assigned ON assigned.id=upg.group_id
+			WHERE upg.user_id=? AND assigned.id NOT IN (?,?)
+		)
 		UNION ALL
 		SELECT pg.id,pg.name,pg.permissions_json,pg.limits_json
 		FROM permission_groups pg
 		JOIN user_permission_groups upg ON upg.group_id=pg.id
-		WHERE upg.user_id=? AND pg.id<>?`, PermissionGroupRegular, userID, PermissionGroupRegular)
+		WHERE upg.user_id=? AND pg.id<>?`, PermissionGroupRegular, userID, PermissionGroupSuperAdmin, PermissionGroupRegular, userID, PermissionGroupRegular)
 	if err != nil {
 		return userAuthorization{}, err
 	}
@@ -722,20 +727,24 @@ func (a *App) authorizationForUser(ctx context.Context, userID, role string) (us
 			return userAuthorization{}, err
 		}
 		if groupID == PermissionGroupRegular {
-			groups[0].Name = name
 			limits = decodeStoredLimits(limitsJSON)
 		} else if isAssignablePermissionGroupID(groupID) {
-			groups = append(groups, PermissionGroupSummary{ID: groupID, Name: name})
 			limits = mergePermissionLimits(limits, decodeStoredLimits(limitsJSON))
 		} else {
 			continue
 		}
+		groups = append(groups, PermissionGroupSummary{ID: groupID, Name: name})
 		for _, permission := range decodeStoredPermissions(permissionsJSON) {
 			seen[permission] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return userAuthorization{}, err
+	}
+	if len(groups) == 0 {
+		// A missing default group must not manufacture permissions or unlimited quotas.
+		groups = append(groups, PermissionGroupSummary{ID: PermissionGroupRegular, Name: "普通用户"})
+		limits = defaultPermissionLimits()
 	}
 
 	permissions := make([]string, 0, len(seen))
@@ -821,16 +830,13 @@ func (a *App) addRegularGroupPermissions(ctx context.Context, tx *sql.Tx, seen m
 }
 
 func (a *App) effectivePermissionsForUserGroups(ctx context.Context, tx *sql.Tx, groupIDs []string) ([]string, error) {
+	groupIDs = cleanIDList(groupIDs)
+	if len(groupIDs) > 0 {
+		return a.permissionsForGroupIDs(ctx, tx, groupIDs)
+	}
 	seen := map[string]bool{}
 	if err := a.addRegularGroupPermissions(ctx, tx, seen); err != nil {
 		return nil, err
-	}
-	groupPermissions, err := a.permissionsForGroupIDs(ctx, tx, groupIDs)
-	if err != nil {
-		return nil, err
-	}
-	for _, permission := range groupPermissions {
-		seen[permission] = true
 	}
 	out := make([]string, 0, len(seen))
 	for _, permission := range allPermissionKeys() {
@@ -842,6 +848,10 @@ func (a *App) effectivePermissionsForUserGroups(ctx context.Context, tx *sql.Tx,
 }
 
 func (a *App) effectiveLimitsForUserGroups(ctx context.Context, tx *sql.Tx, groupIDs []string) (PermissionLimits, error) {
+	groupIDs = cleanIDList(groupIDs)
+	if len(groupIDs) > 0 {
+		return a.limitsForGroupIDs(ctx, tx, groupIDs)
+	}
 	limits, ok, err := a.regularGroupLimits(ctx, tx)
 	if err != nil {
 		return PermissionLimits{}, err
@@ -849,11 +859,7 @@ func (a *App) effectiveLimitsForUserGroups(ctx context.Context, tx *sql.Tx, grou
 	if !ok {
 		limits = defaultPermissionLimits()
 	}
-	groupLimits, err := a.limitsForGroupIDs(ctx, tx, groupIDs)
-	if err != nil {
-		return PermissionLimits{}, err
-	}
-	return mergePermissionLimits(limits, groupLimits), nil
+	return limits, nil
 }
 
 func userHasPermission(user *User, permission string) bool {
@@ -1045,33 +1051,10 @@ func (a *App) setUserPermissionGroups(ctx context.Context, tx *sql.Tx, userID st
 // therefore cannot see uncommitted membership. The group IDs are known at that point,
 // so the limits are merged straight from permission_groups, which is committed data.
 //
-// Precedence mirrors authorizationForUser: the regular-user group replaces the
-// built-in defaults, and every other assignable group is merged on top.
+// Precedence mirrors authorizationForUser: explicit groups replace the regular
+// group; only users without explicit groups receive regular-user defaults.
 func (a *App) permissionLimitsForGroupsTx(ctx context.Context, tx *sql.Tx, groupIDs []string) (PermissionLimits, error) {
-	limits := defaultPermissionLimits()
-	var regularJSON string
-	err := tx.QueryRowContext(ctx, `SELECT limits_json FROM permission_groups WHERE id=?`, PermissionGroupRegular).Scan(&regularJSON)
-	switch {
-	case err == nil:
-		limits = decodeStoredLimits(regularJSON)
-	case errors.Is(err, sql.ErrNoRows):
-	default:
-		return PermissionLimits{}, err
-	}
-	for _, groupID := range cleanIDList(groupIDs) {
-		if groupID == PermissionGroupRegular || !isAssignablePermissionGroupID(groupID) {
-			continue
-		}
-		var limitsJSON string
-		if err := tx.QueryRowContext(ctx, `SELECT limits_json FROM permission_groups WHERE id=?`, groupID).Scan(&limitsJSON); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			return PermissionLimits{}, err
-		}
-		limits = mergePermissionLimits(limits, decodeStoredLimits(limitsJSON))
-	}
-	return limits, nil
+	return a.effectiveLimitsForUserGroups(ctx, tx, groupIDs)
 }
 
 // writeUserPermissionGroups replaces a user's group membership without checking
