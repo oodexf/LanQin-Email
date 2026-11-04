@@ -430,7 +430,7 @@ function setupChecklist(
     },
     {
       key: "mailbox",
-      title: "创建邮箱账号",
+      title: "添加邮箱",
       detail: hasMailbox
         ? uiText("{0} 个活跃邮箱", [overview?.activeMailboxes || 0])
         : "给超级管理员或普通用户创建第一个邮箱",
@@ -1176,7 +1176,7 @@ function PermissionLimitEditor({
         <div className="space-y-2">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <Label>{uiText("邮箱数量上限")}</Label>
-            <span className="text-xs text-muted-foreground">{uiText("按累计创建数计算")}</span>
+            <Badge variant="outline">{uiText("按当前拥有邮箱数计算")}</Badge>
           </div>
           <Input
             type="number"
@@ -1184,9 +1184,7 @@ function PermissionLimitEditor({
             value={value.maxMailboxes}
             onChange={(event) => update("maxMailboxes", event.target.value)}
           />
-          <span className="block text-xs text-muted-foreground">
-            {uiText("删除邮箱不会释放额度")}
-          </span>
+          <Badge variant="outline">{uiText("删除邮箱会释放总额度")}</Badge>
         </div>
         <div className="space-y-2">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
@@ -4154,6 +4152,7 @@ function UserDetailsDialog({
     { label: "权限组", value: <UserPermissionGroupsCell user={user} /> },
   ]
   const quotaFields = [
+    { label: "已用邮箱额度", value: uiText("{0}", [user.mailboxCount]) },
     { label: "累计创建邮箱", value: uiText("{0}", [user.mailboxesCreatedTotal]) },
     { label: "额外邮箱额度", value: uiText("{0}", [user.mailboxQuotaBonus]) },
     { label: "邮箱数量上限", value: limitText(mailboxLimit, "").trim() },
@@ -4210,8 +4209,8 @@ function UserDetailsDialog({
         <section className="space-y-3">
           <h3 className="font-medium">{uiText("配额与限制")}</h3>
           <div className="flex flex-wrap gap-2">
-            <Badge variant="outline">{uiText("按累计创建数计算")}</Badge>
-            <Badge variant="outline">{uiText("删除邮箱不会释放额度")}</Badge>
+            <Badge variant="outline">{uiText("按当前拥有邮箱数计算")}</Badge>
+            <Badge variant="outline">{uiText("删除邮箱会释放总额度")}</Badge>
           </div>
           <dl className="grid gap-3 sm:grid-cols-2">
             {quotaFields.map(({ label, value }) => (
@@ -4947,12 +4946,15 @@ function CreateMailboxDialog({ domains, users }: { domains: Domain[]; users: Adm
   const { toast } = useToast()
   const [open, setOpen] = React.useState(false)
   const [domainId, setDomainId] = React.useState("")
-  const [role, setRole] = React.useState("user")
-  const [ownerMode, setOwnerMode] = React.useState("new")
   const [userId, setUserId] = React.useState("")
+  const activeUsers = users.filter((user) => !user.disabled)
+  const selectedUserId = activeUsers.some((user) => user.id === userId) ? userId : ""
   React.useEffect(() => {
     if (!domainId && domains[0]) setDomainId(domains[0].id)
-    if (!userId && users[0]) setUserId(users[0].id)
+    const activeUser = users.find((user) => !user.disabled)
+    if (!users.some((user) => user.id === userId && !user.disabled)) {
+      setUserId(activeUser?.id || "")
+    }
   }, [domains, domainId, users, userId])
   const mut = useMutation({
     mutationFn: (form: FormData) =>
@@ -4960,11 +4962,8 @@ function CreateMailboxDialog({ domains, users }: { domains: Domain[]; users: Adm
         domainId,
         localPart: String(form.get("localPart")),
         displayName: String(form.get("displayName")),
-        password: String(form.get("password")),
         quotaMb: Number(form.get("quotaMb") || 1024),
-        role: role as "admin" | "user",
-        ownerEmail: String(form.get("ownerEmail") || ""),
-        userId: ownerMode === "existing" ? userId : "",
+        userId: selectedUserId,
       }),
     onSuccess: () => {
       invalidateAdmin(qc)
@@ -4978,17 +4977,18 @@ function CreateMailboxDialog({ domains, users }: { domains: Domain[]; users: Adm
       <DialogTrigger asChild>
         <Button>
           <Plus className="h-4 w-4" />
-          {uiText("邮箱")}
+          {uiText("添加邮箱")}
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent aria-describedby={undefined} data-lanqin-i18n-ignore>
         <DialogHeader>
-          <DialogTitle>{uiText("创建邮箱账号")}</DialogTitle>
+          <DialogTitle>{uiText("添加邮箱")}</DialogTitle>
         </DialogHeader>
         <form
           className="space-y-4"
           onSubmit={(e) => {
             e.preventDefault()
+            if (!selectedUserId) return
             mut.mutate(new FormData(e.currentTarget))
           }}
         >
@@ -4998,49 +4998,18 @@ function CreateMailboxDialog({ domains, users }: { domains: Domain[]; users: Adm
             <Field name="displayName" label={uiText("显示名")} placeholder="Alice" />
           </div>
           <SelectField
-            label={uiText("归属方式")}
-            value={ownerMode}
-            onValueChange={setOwnerMode}
-            items={[
-              ["new", "新建/按邮箱匹配用户"],
-              ["existing", "追加到已有用户"],
-            ]}
+            label={uiText("所属用户")}
+            value={selectedUserId}
+            onValueChange={setUserId}
+            items={activeUsers.map((user) => [user.id, user.email])}
+            disabled={activeUsers.length === 0}
           />
-          {ownerMode === "existing" ? (
-            <SelectField
-              label={uiText("已有用户")}
-              value={userId}
-              onValueChange={setUserId}
-              items={users.filter((u) => !u.disabled).map((u) => [u.id, u.email])}
-            />
-          ) : (
-            <Field
-              name="ownerEmail"
-              label={uiText("归属用户邮箱")}
-              placeholder={uiText("留空则使用新邮箱")}
-              required={false}
-            />
-          )}
-          <div className="grid grid-cols-2 gap-3">
-            <Field
-              name="password"
-              label={uiText("密码")}
-              type="password"
-              placeholder={uiText("至少 8 位")}
-            />
-            <Field name="quotaMb" label={uiText("配额 MB")} type="number" defaultValue="1024" />
-          </div>
-          <SelectField
-            label={uiText("身份")}
-            value={role}
-            onValueChange={setRole}
-            items={[
-              ["user", "普通用户"],
-              ["admin", "超级管理员"],
-            ]}
-          />
+          {activeUsers.length === 0 && <Empty text={uiText("请先在用户管理中创建并启用用户")} />}
+          <Field name="quotaMb" label={uiText("配额 MB")} type="number" defaultValue="1024" />
           <DialogFooter>
-            <Button disabled={mut.isPending || !domainId}>{uiText("创建")}</Button>
+            <Button disabled={mut.isPending || !domainId || !selectedUserId}>
+              {mut.isPending ? uiText("创建中...") : uiText("添加邮箱")}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

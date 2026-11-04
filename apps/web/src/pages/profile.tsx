@@ -590,8 +590,9 @@ export function ProfilePage() {
   const applyMailbox = useMutation({
     mutationFn: api.applyMailbox,
     onSuccess: (mailbox) => {
-      qc.invalidateQueries({ queryKey: ["mailboxes", "mine"] })
+      qc.invalidateQueries({ queryKey: ["mailboxes", "owned"] })
       qc.invalidateQueries({ queryKey: ["mailbox-apply-options"] })
+      qc.invalidateQueries({ queryKey: ["me"] })
       setMailboxId(mailbox.id)
       toast({ title: "邮箱已申请" })
     },
@@ -918,7 +919,7 @@ export function ProfilePage() {
           mailboxQuota={
             user
               ? {
-                  used: user.mailboxesCreatedTotal,
+                  used: user.mailboxCount,
                   limit:
                     user.limits.maxMailboxes > 0
                       ? user.limits.maxMailboxes + user.mailboxQuotaBonus

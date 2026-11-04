@@ -40,6 +40,17 @@ Validation failures — including a duplicate domain name — return `400 Bad Re
 
 校验失败（包括域名重复）会返回 `400 Bad Request`，而不是 `409`。
 
+## Permission Group Fallback / 权限组回退规则
+
+- Non-admin users without custom groups use the regular-user group. Explicit custom groups replace that fallback; their permissions are combined by union and their quota limits retain the existing merge rules (zero means unlimited).
+- 未分配自定义组的普通用户使用“普通用户”默认组；已分配自定义组时，仅合并显式分配的组，不再叠加默认组。多组功能权限取并集，配额沿用原有合并规则（数值 `0` 表示不限额，而不是禁止使用）。
+- A group with no permissions does not grant access to protected mail or admin APIs. It does not deny permissions granted by another explicit group, disable the account, or block public login pages.
+- 零功能组不授予受保护的邮箱或后台 API 权限，但不会否决另一个显式组授予的权限，也不等同于停用账户或禁止访问公开登录页。已有登录会话和 API Token 在后续请求中使用最新权限。
+
+**Upgrade note / 升级注意：** existing custom-group users no longer inherit regular-user permissions or higher default quotas. Before upgrading, explicitly add required permissions and quotas to their custom groups. This authorization tightening does not delete existing mailboxes or messages.
+
+现有自定义组用户升级后不再继承普通组的功能权限或较高配额。升级前应核对并在自定义组中显式补齐所需权限与配额；该权限收紧不会删除已有邮箱或邮件。
+
 ## Health Endpoints / 健康检查
 
 Health endpoints do not require authentication and never include database DSNs, storage paths, or underlying errors in their responses.
@@ -343,6 +354,10 @@ Authorization: Bearer lq_xxx
 **注意：** 该接口一次性返回所有邮箱，不分页。
 
 ### Create mailbox
+
+The management UI's **Add mailbox** action (`POST /api/admin/mailboxes`) only attaches a mailbox to an active, existing `userId` and inherits that user's password. Create login users separately in **User Management** (`POST /api/admin/users`). It does not create users or change their password or role; legacy `password`, `role`, and `ownerEmail` fields are ignored. The public OpenAPI endpoint below retains its existing owner-resolution and password behavior.
+
+管理界面的**添加邮箱**（`POST /api/admin/mailboxes`）仅向已启用的已有 `userId` 追加邮箱，并沿用该用户的密码。登录用户应在**用户管理**（`POST /api/admin/users`）中单独创建；添加邮箱不会创建用户，也不会修改用户密码或身份，旧客户端传入的 `password`、`role` 和 `ownerEmail` 字段会被忽略。下方对外 OpenAPI 保持原有的拥有者解析和密码行为。
 
 ```http
 POST /api/open/v1/mailboxes
