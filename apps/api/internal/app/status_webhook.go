@@ -180,12 +180,18 @@ func (a *App) validatedStatusWebhookURL(ctx context.Context) (*url.URL, error) {
 }
 
 func (a *App) statusWebhookDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if a.cfg.StatusWebhookAllowPrivateHosts {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, address)
+	}
+	return dialPublicOnly(ctx, network, address, "status webhook")
+}
+
+// dialPublicOnly resolves the host itself and connects only when every resolved
+// address is a public unicast IP, so DNS rebinding cannot reach internal services.
+func dialPublicOnly(ctx context.Context, network, address, label string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
-	}
-	if a.cfg.StatusWebhookAllowPrivateHosts {
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, address)
 	}
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
@@ -193,7 +199,7 @@ func (a *App) statusWebhookDialContext(ctx context.Context, network, address str
 	}
 	for _, ip := range ips {
 		if !isPublicUnicastIP(ip) {
-			return nil, errors.New("private or local status webhook hosts are not allowed")
+			return nil, fmt.Errorf("private or local %s hosts are not allowed", label)
 		}
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
@@ -206,7 +212,7 @@ func (a *App) statusWebhookDialContext(ctx context.Context, network, address str
 		lastErr = err
 	}
 	if lastErr == nil {
-		lastErr = errors.New("status webhook host resolved without usable addresses")
+		lastErr = fmt.Errorf("%s host resolved without usable addresses", label)
 	}
 	return nil, lastErr
 }

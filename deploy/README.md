@@ -224,6 +224,16 @@ LANQIN_NOTIFICATION_SECRET_KEY=replace-with-a-long-random-secret
 
 重启服务后，拥有“管理收件规则”权限的用户可在“个人中心 > 收件规则”中填写自己的 Bot Token 和 Chat ID，并把“发送 Telegram 通知”添加为规则动作。Token 使用该主密钥加密后保存；更换或丢失主密钥会导致已有 Token 无法解密。通知先写入 outbox，再异步投递并按退避策略最多重试 10 次。
 
+如需在 Telegram 通知中附带 AI 摘要，再配置一个 OpenAI 兼容接口：
+
+```env
+LANQIN_AI_BASE_URL=https://api.openai.com/v1
+LANQIN_AI_API_KEY=replace-with-your-api-key
+LANQIN_AI_MODEL=replace-with-a-model-name
+```
+
+配置后，用户可在规则的 Telegram 动作上勾选“AI 摘要”并选择输出语言。**勾选后，命中邮件的主题、发件人和正文前 `LANQIN_AI_MAX_INPUT_CHARS` 字会发送给该服务**，附件不会发送；请确认所选服务符合你的隐私要求。希望数据不出内网时，可指向自建的 Ollama / vLLM（如 `http://127.0.0.1:11434/v1`），并开启 `LANQIN_AI_ALLOW_PRIVATE_HOSTS=true`；默认只允许公网 HTTPS，且不跟随重定向。模型输出只作为纯文本展示：其中的链接会被移除，验证码必须在原邮件中逐字出现才会保留，重要度只用于标记、不会导致通知被丢弃。调用失败、超时或超出 `LANQIN_AI_DAILY_LIMIT_PER_USER` 时，会照常发送普通通知。回滚时清空 `LANQIN_AI_BASE_URL` 并重启 API 即可：已勾选 AI 的规则会自动退回普通通知，新增的 `telegram_notification_outbox.ai_status` 列可保留。
+
 Split stack 使用 `docker-compose.stack.yml` 时，API 容器默认会把 `LANQIN_SMTP_HOST` 覆盖为 `postfix`，让 Webmail 和 SMTP 提交都 relay 到 Postfix service。只有改用外部 SMTP 时才需要在 `.env` 明确填写 `LANQIN_STACK_SMTP_HOST` / `LANQIN_STACK_SMTP_PORT`。
 
 如果发送队列里出现 relay 失败，通常是 Postfix 会话被中断或外部 SMTP 配置错误。优先检查：

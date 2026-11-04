@@ -502,6 +502,7 @@ func prepareExternalSchemaUpgrade(t *testing.T, cfg Config, from int) {
 		version    int
 		statements []string
 	}{
+		{14, []string{"ALTER TABLE telegram_notification_outbox DROP COLUMN ai_status"}},
 		{13, []string{"ALTER TABLE send_queue DROP COLUMN sent_copy_attempt_count", "ALTER TABLE send_queue DROP COLUMN subject", "DROP TABLE external_mail_oauth_states", "ALTER TABLE external_imap_accounts DROP COLUMN provider_preset", "ALTER TABLE external_imap_accounts DROP COLUMN auth_status", "ALTER TABLE external_imap_accounts DROP COLUMN oauth_subject", "ALTER TABLE external_imap_accounts DROP COLUMN oauth_generation", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_host", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_port", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_tls_mode", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_username", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_password_ciphertext", "ALTER TABLE external_imap_accounts DROP COLUMN send_enabled", "ALTER TABLE external_imap_accounts DROP COLUMN sent_copy_mode", "ALTER TABLE send_queue DROP COLUMN route", "ALTER TABLE send_queue DROP COLUMN external_account_id", "ALTER TABLE send_queue DROP COLUMN sent_copy_status"}},
 		{12, []string{"DROP TABLE mailbox_push_requests", "DROP TABLE domain_collections", "DROP TABLE domain_collection_audit", "DROP TABLE local_delivery_jobs"}},
 		{11, []string{"ALTER TABLE smtp_send_events DROP COLUMN recipients"}},

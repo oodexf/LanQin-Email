@@ -440,6 +440,7 @@ export type TelegramSettings = {
   enabled: boolean
   lastDeliveredAt?: string
   lastError?: string
+  aiAvailable: boolean
 }
 export type ForwardAddress = {
   id: string

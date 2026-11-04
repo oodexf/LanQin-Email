@@ -240,6 +240,7 @@ func postgresFreshSchema() []string {
 			message_id VARCHAR(64) NOT NULL,
 			rule_id VARCHAR(64) NOT NULL,
 			payload_json TEXT NOT NULL,
+			ai_status VARCHAR(16) NOT NULL DEFAULT '',
 			attempt_count INTEGER NOT NULL DEFAULT 0,
 			next_attempt_at VARCHAR(35) NOT NULL,
 			last_error TEXT NOT NULL DEFAULT '',

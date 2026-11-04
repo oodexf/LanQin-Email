@@ -34,6 +34,22 @@ func (a *App) migrateQueueLeases(ctx context.Context) error {
 	return nil
 }
 
+// migrateTelegramAIStatus adds the per-item AI summary state to SQLite databases
+// created before AI summaries existed. Existing rows default to "" (no AI).
+func (a *App) migrateTelegramAIStatus(ctx context.Context) error {
+	columns, err := sqliteTableColumns(ctx, a.db, "telegram_notification_outbox")
+	if err != nil {
+		return err
+	}
+	if columns["ai_status"] {
+		return nil
+	}
+	if _, err := a.db.ExecContext(ctx, `ALTER TABLE telegram_notification_outbox ADD COLUMN ai_status TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add telegram_notification_outbox.ai_status: %w", err)
+	}
+	return nil
+}
+
 func sqliteTableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {

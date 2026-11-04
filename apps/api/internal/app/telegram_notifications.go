@@ -41,6 +41,7 @@ type TelegramSettings struct {
 	Enabled         bool       `json:"enabled"`
 	LastDeliveredAt *time.Time `json:"lastDeliveredAt,omitempty"`
 	LastError       string     `json:"lastError,omitempty"`
+	AIAvailable     bool       `json:"aiAvailable"`
 }
 
 type telegramSettingsRecord struct {
@@ -55,8 +56,9 @@ type telegramSettingsRecord struct {
 }
 
 type telegramNotificationPayload struct {
-	Text string `json:"text"`
-	URL  string `json:"url,omitempty"`
+	Text       string `json:"text"`
+	URL        string `json:"url,omitempty"`
+	AILanguage string `json:"aiLanguage,omitempty"`
 }
 
 type telegramAPIResponse struct {
@@ -246,7 +248,7 @@ func (a *App) handleTestTelegramSettings(w http.ResponseWriter, r *http.Request)
 }
 
 func (a *App) telegramSettingsSnapshot(ctx context.Context, userID string) (TelegramSettings, error) {
-	out := TelegramSettings{Available: strings.TrimSpace(a.cfg.NotificationSecretKey) != ""}
+	out := TelegramSettings{Available: strings.TrimSpace(a.cfg.NotificationSecretKey) != "", AIAvailable: a.aiSummaryAvailable()}
 	record, err := a.telegramSettingsRecord(ctx, userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil
@@ -293,7 +295,10 @@ func (a *App) telegramConfiguredForUser(ctx context.Context, userID string) (boo
 	return count > 0, err
 }
 
-func (a *App) enqueueTelegramNotification(ctx context.Context, userID, mailboxID, messageID, ruleID string) error {
+// enqueueTelegramNotification queues a rule notification. actionValue is the
+// telegram rule action value; "ai:<lang>" marks the item for an AI summary,
+// which the worker adds later on top of the plain-text payload stored here.
+func (a *App) enqueueTelegramNotification(ctx context.Context, userID, mailboxID, messageID, ruleID, actionValue string) error {
 	configured, err := a.telegramConfiguredForUser(ctx, userID)
 	if err != nil {
 		return err
@@ -312,11 +317,16 @@ func (a *App) enqueueTelegramNotification(ctx context.Context, userID, mailboxID
 		Text: telegramNotificationText(mailboxAddress, strings.TrimSpace(fromName+" "+fromAddress), subject, snippet),
 		URL:  a.telegramMessageURL(mailboxID, messageID),
 	}
+	aiStatus := telegramAIStatusNone
+	if lang := telegramAIActionLanguage(actionValue); lang != "" {
+		payload.AILanguage = lang
+		aiStatus = telegramAIStatusPending
+	}
 	now := a.now().UTC().Format(time.RFC3339Nano)
 	eventKey := "telegram:" + ruleID + ":" + messageID
-	query := insertIgnoreSQL(a.cfg.DBDriver, `INSERT INTO telegram_notification_outbox(id,event_key,user_id,mailbox_id,message_id,rule_id,payload_json,next_attempt_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)`, `(event_key)`)
-	_, err = a.db.ExecContext(ctx, query, newID("tgn"), eventKey, userID, mailboxID, messageID, ruleID, jsonEncode(payload), now, now, now)
+	query := insertIgnoreSQL(a.cfg.DBDriver, `INSERT INTO telegram_notification_outbox(id,event_key,user_id,mailbox_id,message_id,rule_id,payload_json,ai_status,next_attempt_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, `(event_key)`)
+	_, err = a.db.ExecContext(ctx, query, newID("tgn"), eventKey, userID, mailboxID, messageID, ruleID, jsonEncode(payload), aiStatus, now, now, now)
 	return err
 }
 
@@ -414,6 +424,7 @@ func (a *App) processDueTelegramNotifications(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		payload = a.applyTelegramAISummary(ctx, value, payload)
 		if err := a.deliverTelegramMessage(ctx, settings, payload); err != nil {
 			a.failTelegramNotification(ctx, value.id, value.userID, value.attempt, value.leaseToken, err)
 			continue
@@ -428,8 +439,8 @@ func (a *App) processDueTelegramNotifications(ctx context.Context) error {
 }
 
 type telegramNotificationOutboxItem struct {
-	id, userID, payload, leaseToken string
-	attempt                         int
+	id, userID, mailboxID, messageID, payload, leaseToken, aiStatus string
+	attempt                                                         int
 }
 
 func (a *App) claimTelegramNotification(ctx context.Context, id string) (telegramNotificationOutboxItem, error) {
@@ -444,7 +455,7 @@ func (a *App) claimTelegramNotification(ctx context.Context, id string) (telegra
 		return telegramNotificationOutboxItem{}, sql.ErrNoRows
 	}
 	var item telegramNotificationOutboxItem
-	err = a.db.QueryRowContext(ctx, `SELECT id,user_id,payload_json,attempt_count,lease_token FROM telegram_notification_outbox WHERE id=? AND lease_token=?`, id, token).Scan(&item.id, &item.userID, &item.payload, &item.attempt, &item.leaseToken)
+	err = a.db.QueryRowContext(ctx, `SELECT id,user_id,mailbox_id,message_id,payload_json,ai_status,attempt_count,lease_token FROM telegram_notification_outbox WHERE id=? AND lease_token=?`, id, token).Scan(&item.id, &item.userID, &item.mailboxID, &item.messageID, &item.payload, &item.aiStatus, &item.attempt, &item.leaseToken)
 	return item, err
 }
 
