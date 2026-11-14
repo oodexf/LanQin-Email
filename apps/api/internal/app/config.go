@@ -83,6 +83,13 @@ type Config struct {
 	StatusWebhookURL                string
 	StatusWebhookSecret             string
 	StatusWebhookAllowPrivateHosts  bool
+	AIBaseURL                       string
+	AIAPIKey                        string
+	AIModel                         string
+	AITimeoutSeconds                int
+	AIMaxInputChars                 int
+	AIDailyLimitPerUser             int
+	AIAllowPrivateHosts             bool
 }
 
 func LoadConfig() Config {
@@ -162,6 +169,13 @@ func LoadConfig() Config {
 		StatusWebhookURL:                getenv("LANQIN_STATUS_WEBHOOK_URL", ""),
 		StatusWebhookSecret:             getenv("LANQIN_STATUS_WEBHOOK_SECRET", ""),
 		StatusWebhookAllowPrivateHosts:  getenvBool("LANQIN_STATUS_WEBHOOK_ALLOW_PRIVATE_HOSTS", false),
+		AIBaseURL:                       getenv("LANQIN_AI_BASE_URL", ""),
+		AIAPIKey:                        getenv("LANQIN_AI_API_KEY", ""),
+		AIModel:                         getenv("LANQIN_AI_MODEL", ""),
+		AITimeoutSeconds:                getenvInt("LANQIN_AI_TIMEOUT_SECONDS", 20),
+		AIMaxInputChars:                 getenvInt("LANQIN_AI_MAX_INPUT_CHARS", 4000),
+		AIDailyLimitPerUser:             getenvInt("LANQIN_AI_DAILY_LIMIT_PER_USER", 200),
+		AIAllowPrivateHosts:             getenvBool("LANQIN_AI_ALLOW_PRIVATE_HOSTS", false),
 	}
 }
 

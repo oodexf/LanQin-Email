@@ -458,6 +458,7 @@ func (a *App) migrate(ctx context.Context) error {
 			message_id TEXT NOT NULL,
 			rule_id TEXT NOT NULL,
 			payload_json TEXT NOT NULL,
+			ai_status TEXT NOT NULL DEFAULT '',
 			attempt_count INTEGER NOT NULL DEFAULT 0,
 			next_attempt_at TEXT NOT NULL,
 			last_error TEXT NOT NULL DEFAULT '',
@@ -909,6 +910,9 @@ func (a *App) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := a.migrateQueueLeases(ctx); err != nil {
+		return err
+	}
+	if err := a.migrateTelegramAIStatus(ctx); err != nil {
 		return err
 	}
 	if err := a.migrateMessageThreads(ctx); err != nil {

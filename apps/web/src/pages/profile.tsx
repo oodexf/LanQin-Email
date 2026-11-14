@@ -2,6 +2,8 @@ import {
   uiMessage,
   type UiText,
   getInitialLanguage,
+  languageOptions,
+  type Language,
   uiText,
   useLanguage as useUiLanguage,
 } from "@/lib/language"
@@ -145,6 +147,8 @@ import {
   isForwardEmail,
   normalizeDraftAction,
   ruleActionLabels,
+  telegramAILanguage,
+  telegramAIValue,
   type RuleConditionField,
   type RuleConditionOperator,
   type RuleCreatePayload,
@@ -3810,6 +3814,7 @@ function RulesSection({
         labels={labels}
         forwardAddresses={forwardAddresses.filter((item) => item.verified)}
         telegramReady={telegramReady}
+        aiAvailable={telegramReady && Boolean(telegram?.aiAvailable)}
         pending={pending}
         onCreate={onCreate}
       />
@@ -3950,6 +3955,7 @@ function RuleDialog({
   labels,
   forwardAddresses,
   telegramReady,
+  aiAvailable,
   pending,
   onCreate,
 }: {
@@ -3959,6 +3965,7 @@ function RuleDialog({
   labels: MailLabel[]
   forwardAddresses: ForwardAddress[]
   telegramReady: boolean
+  aiAvailable: boolean
   pending: boolean
   onCreate: (payload: RuleCreatePayload) => void
 }) {
@@ -4047,6 +4054,9 @@ function RuleDialog({
     .filter((item) => item.type !== "label" || item.value || item.labelId)
     .filter((item) => item.type !== "move" || item.value)
     .filter((item) => item.type !== "forward" || isForwardEmail(item.value))
+    .map((item) =>
+      item.type === "telegram" && !aiAvailable ? { type: "telegram" as const } : item
+    )
   const canCreate =
     validConditions.length > 0 &&
     validActions.length > 0 &&
@@ -4214,6 +4224,7 @@ function RuleDialog({
                       action={action}
                       labels={availableLabels}
                       forwardAddresses={forwardAddresses}
+                      aiAvailable={aiAvailable}
                       onChange={(patch) => updateAction(index, patch)}
                     />
                     <Button
@@ -4273,14 +4284,16 @@ function RuleActionValue({
   action,
   labels,
   forwardAddresses,
+  aiAvailable,
   onChange,
 }: {
   action: MailRuleAction
   labels: MailLabel[]
   forwardAddresses: ForwardAddress[]
+  aiAvailable: boolean
   onChange: (patch: Partial<MailRuleAction>) => void
 }) {
-  useUiLanguage()
+  const [language] = useUiLanguage()
 
   if (action.type === "label") {
     if (labels.length > 0) {
@@ -4361,6 +4374,37 @@ function RuleActionValue({
           ))}
         </SelectContent>
       </Select>
+    )
+  }
+  if (action.type === "telegram" && aiAvailable) {
+    const aiLanguage = telegramAILanguage(action.value)
+    return (
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_180px] md:items-center">
+        <RuleCheckbox
+          checked={Boolean(aiLanguage)}
+          onCheckedChange={(checked) =>
+            onChange({ value: checked ? telegramAIValue(language) : "" })
+          }
+          label={uiText("AI 摘要（邮件内容将发送给 AI 服务）")}
+        />
+        {aiLanguage && (
+          <Select
+            value={aiLanguage}
+            onValueChange={(next) => onChange({ value: telegramAIValue(next as Language) })}
+          >
+            <SelectTrigger aria-label={uiText("AI 摘要语言")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {languageOptions.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+      </div>
     )
   }
   return <Input value="无需填写" readOnly />

@@ -1,4 +1,4 @@
-import { uiText } from "@/lib/language"
+import { languageOptions, type Language, uiText } from "@/lib/language"
 import type { MailLabel, MailRuleAction, MailRuleCondition } from "@/lib/api"
 
 export type RuleCreatePayload = {
@@ -80,6 +80,20 @@ export const ruleActionLabels: Record<MailRuleAction["type"], string> = {
   telegram: "发送 Telegram 通知",
 }
 
+const telegramAIPrefix = "ai:"
+
+/** Returns the AI summary language encoded in a telegram action value, if any. */
+export function telegramAILanguage(value?: string): Language | "" {
+  const raw = (value || "").trim()
+  if (!raw.startsWith(telegramAIPrefix)) return ""
+  const language = raw.slice(telegramAIPrefix.length)
+  return languageOptions.some((item) => item.value === language) ? (language as Language) : ""
+}
+
+export function telegramAIValue(language: Language) {
+  return `${telegramAIPrefix}${language}`
+}
+
 export function normalizeDraftAction(action: MailRuleAction, labels: MailLabel[]): MailRuleAction {
   if (action.type === "label") {
     const value = action.value || labels[0]?.name || ""
@@ -91,6 +105,10 @@ export function normalizeDraftAction(action: MailRuleAction, labels: MailLabel[]
   }
   if (action.type === "move") return { type: "move", value: action.value || "Archive" }
   if (action.type === "forward") return { type: "forward", value: (action.value || "").trim() }
+  if (action.type === "telegram") {
+    const language = telegramAILanguage(action.value)
+    return language ? { type: "telegram", value: telegramAIValue(language) } : { type: "telegram" }
+  }
   return { type: action.type }
 }
 
@@ -156,6 +174,11 @@ export function actionSummary(action: MailRuleAction) {
     return `${uiText(ruleActionLabels[action.type])}：${folderLabel(action.value || "Archive")}`
   if (action.type === "forward")
     return `${uiText(ruleActionLabels[action.type])}：${action.value || ""}`
+  if (action.type === "telegram") {
+    const language = telegramAILanguage(action.value)
+    const option = languageOptions.find((item) => item.value === language)
+    if (option) return uiText("发送 Telegram 通知（AI 摘要 · {0}）", [option.label])
+  }
   return uiText(ruleActionLabels[action.type])
 }
 

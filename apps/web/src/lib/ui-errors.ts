@@ -62,6 +62,7 @@ const knownErrors: Record<string, string> = {
   "failed to load remote messages": "无法读取远端邮件，请稍后重试",
   "failed to load remote message": "无法读取远端邮件，请稍后重试",
   "failed to update remote message": "无法更新远端邮件，请稍后重试",
+  "AI summaries are not available": "AI 摘要服务未启用",
 }
 
 /** Keep a safe source message in query state; translate only when rendering it. */

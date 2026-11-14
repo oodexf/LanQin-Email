@@ -12,7 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-const externalSchemaVersion = 13
+const externalSchemaVersion = 14
 
 var externalSchemaTables = []string{
 	"domain_collections",
@@ -162,6 +162,9 @@ func initializeExternalSchemaOnConn(ctx context.Context, conn *sql.Conn, driver 
 		if err := migrateExternalSchemaV13(ctx, conn, driver); err != nil {
 			return err
 		}
+		if err := migrateExternalSchemaV14(ctx, conn, driver); err != nil {
+			return err
+		}
 		pushTable := strings.Replace(mailboxPushExternalTable(driver), "CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
 		if _, err := conn.ExecContext(ctx, pushTable); err != nil {
 			return err
@@ -210,7 +213,7 @@ func initializeExternalSchemaOnConn(ctx context.Context, conn *sql.Conn, driver 
 	for _, migration := range []struct {
 		version int
 		name    string
-	}{{1, migrationName}, {2, "external_schema_v2_linuxdo_sso"}, {3, "external_schema_v3_registration_invites"}, {4, "external_schema_v4_telegram_notifications"}, {5, "external_schema_v5_login_rate_limits"}, {6, "external_schema_v6_queue_leases"}, {7, "external_schema_v7_message_threads"}, {8, "external_schema_v8_mailbox_quota"}, {9, "external_schema_v9_invite_groups_mailbox_rate"}, {10, "external_schema_v10_session_indexes_totp_replay"}, {11, "external_schema_v11_smtp_rate_recipients"}, {12, "external_schema_v12_domain_collection"}, {13, "external_schema_v13_external_mail_oauth"}} {
+	}{{1, migrationName}, {2, "external_schema_v2_linuxdo_sso"}, {3, "external_schema_v3_registration_invites"}, {4, "external_schema_v4_telegram_notifications"}, {5, "external_schema_v5_login_rate_limits"}, {6, "external_schema_v6_queue_leases"}, {7, "external_schema_v7_message_threads"}, {8, "external_schema_v8_mailbox_quota"}, {9, "external_schema_v9_invite_groups_mailbox_rate"}, {10, "external_schema_v10_session_indexes_totp_replay"}, {11, "external_schema_v11_smtp_rate_recipients"}, {12, "external_schema_v12_domain_collection"}, {13, "external_schema_v13_external_mail_oauth"}, {14, "external_schema_v14_telegram_ai_status"}} {
 		marker := fmt.Sprintf("INSERT INTO schema_migrations(version,name,applied_at) VALUES(%d,'%s',CURRENT_TIMESTAMP)", migration.version, migration.name)
 		if _, err := executor.ExecContext(ctx, marker); err != nil {
 			return fmt.Errorf("external schema: record v%d: %w", migration.version, err)
@@ -403,6 +406,9 @@ func validateExternalSchema(ctx context.Context, conn dbQueryer, actual []string
 	}
 	if err := conn.QueryRowContext(ctx, "SELECT name FROM schema_migrations WHERE version=13").Scan(&name); err != nil || name != "external_schema_v13_external_mail_oauth" {
 		return fmt.Errorf("external schema: invalid v13 migration marker")
+	}
+	if err := conn.QueryRowContext(ctx, "SELECT name FROM schema_migrations WHERE version=14").Scan(&name); err != nil || name != "external_schema_v14_telegram_ai_status" {
+		return fmt.Errorf("external schema: invalid v14 migration marker")
 	}
 	return nil
 }
@@ -775,6 +781,18 @@ func migrateExternalSchemaV10(ctx context.Context, conn *sql.Conn, driver string
 		`CREATE INDEX idx_sessions_user ON sessions(user_id)`,
 		`CREATE INDEX idx_sessions_expires ON sessions(expires_at)`,
 		`ALTER TABLE users ADD COLUMN two_factor_last_counter BIGINT NOT NULL DEFAULT 0`,
+	})
+}
+
+// migrateExternalSchemaV14 records whether a Telegram notification asked for an
+// AI summary and how that went. Existing rows default to "" (no AI requested).
+func migrateExternalSchemaV14(ctx context.Context, conn *sql.Conn, driver string) error {
+	applied, err := externalSchemaHistory(ctx, conn, 14)
+	if err != nil || applied {
+		return err
+	}
+	return applyExternalSchemaMigration(ctx, conn, driver, 14, "external_schema_v14_telegram_ai_status", []string{
+		`ALTER TABLE telegram_notification_outbox ADD COLUMN ai_status VARCHAR(16) NOT NULL DEFAULT ''`,
 	})
 }
 

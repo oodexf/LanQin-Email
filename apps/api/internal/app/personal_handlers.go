@@ -500,6 +500,10 @@ func (a *App) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, errors.New("Telegram notifications must be configured and enabled first"))
 			return
 		}
+		if ruleRequestsAISummary(actions) && !a.aiSummaryAvailable() {
+			badRequest(w, errors.New("AI summaries are not available"))
+			return
+		}
 	}
 	if len(ruleForwardRecipients(actions)) > maxRuleForwardRecipients {
 		badRequest(w, fmt.Errorf("at most %d forward recipients are allowed", maxRuleForwardRecipients))
@@ -1107,6 +1111,10 @@ func normalizeRuleActions(items []MailRuleAction, legacyAction string) []MailRul
 		if typ == "move" && value == "" {
 			continue
 		}
+		if typ == "telegram" {
+			value = normalizeTelegramActionValue(value)
+			labelID = ""
+		}
 		if typ == "forward" {
 			value = normalizeRuleForwardAddress(value)
 			if value == "" {
@@ -1121,6 +1129,15 @@ func normalizeRuleActions(items []MailRuleAction, legacyAction string) []MailRul
 func ruleHasAction(actions []MailRuleAction, actionType string) bool {
 	for _, action := range actions {
 		if action.Type == actionType {
+			return true
+		}
+	}
+	return false
+}
+
+func ruleRequestsAISummary(actions []MailRuleAction) bool {
+	for _, action := range actions {
+		if action.Type == "telegram" && telegramAIActionLanguage(action.Value) != "" {
 			return true
 		}
 	}
@@ -1375,7 +1392,7 @@ func (a *App) applyRuleActions(ctx context.Context, mailboxID, messageID, ruleID
 				if err := a.db.QueryRowContext(ctx, `SELECT user_id FROM mailboxes WHERE id=?`, mailboxID).Scan(&userID); err != nil {
 					return err
 				}
-				if err := a.enqueueTelegramNotification(ctx, userID, mailboxID, messageID, ruleID); err != nil {
+				if err := a.enqueueTelegramNotification(ctx, userID, mailboxID, messageID, ruleID, action.Value); err != nil {
 					return err
 				}
 			}

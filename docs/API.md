@@ -805,6 +805,14 @@ Add `{ "type": "telegram" }` to a mail rule's `actions` array. Matching new Inbo
 
 在收件规则的 `actions` 中加入 `{ "type": "telegram" }`。新进入 Inbox 且命中规则的邮件会先写入持久化 outbox，再异步发送；同一规则和邮件只会入队一次。Telegram 限流响应会遵循 `retry_after`，其他临时失败按退避策略最多重试 10 次。“应用于现有邮件”不会补发 Telegram 通知。
 
+### AI summaries / AI 摘要
+
+When the administrator configures `LANQIN_AI_BASE_URL` and `LANQIN_AI_MODEL` (an OpenAI-compatible `/chat/completions` endpoint), `GET /api/me/telegram` returns `"aiAvailable": true`. A telegram action may then carry `"value": "ai:zh-CN" | "ai:zh-TW" | "ai:en"`, for example `{ "type": "telegram", "value": "ai:en" }`. Saving such a rule while AI summaries are unavailable returns `400 AI summaries are not available`; any other `value` is normalized to `""` (plain notification).
+
+The worker sends the subject, sender and the first `LANQIN_AI_MAX_INPUT_CHARS` characters of the body (never attachments) to the model once per outbox item, then delivers a plain-text summary with a priority marker and any verification codes that appear verbatim in the message. Links in model output are removed. If the model fails, times out, returns unusable output, or the user exceeds `LANQIN_AI_DAILY_LIMIT_PER_USER` calls per 24 hours, the regular notification is sent instead. Telegram delivery retries reuse the stored summary instead of calling the model again.
+
+管理员配置 `LANQIN_AI_BASE_URL` 与 `LANQIN_AI_MODEL`（OpenAI 兼容 `/chat/completions` 接口）后，`GET /api/me/telegram` 返回 `"aiAvailable": true`，Telegram 动作可携带 `"value": "ai:zh-CN" | "ai:zh-TW" | "ai:en"`。AI 不可用时保存此类规则返回 `400 AI summaries are not available`；其他 `value` 会被归一为 `""`（普通通知）。worker 每个 outbox 任务只调用一次模型，发送主题、发件人和正文前 `LANQIN_AI_MAX_INPUT_CHARS` 字（不发送附件），推送纯文本摘要、重要度标记，以及在原邮件中逐字出现的验证码；模型输出中的链接会被移除。模型失败、超时、输出不可用，或用户 24 小时内调用超过 `LANQIN_AI_DAILY_LIMIT_PER_USER` 次时，改发普通通知。Telegram 投递重试会复用已生成的摘要，不会重复调用模型。
+
 ## Admin Delivery Queue / 管理员投递队列
 
 Administrators with `admin.settings.view` can inspect the unified delivery queue via `GET /api/admin/delivery-queue`. Use `queueType=send|webhook|telegram`, `status=pending|failed|delivered|canceled`, `page` (1-based), and `limit` (1-100) filters. Responses contain only task metadata, attempt counters, timestamps, and a short redacted error; message MIME, webhook payloads, Telegram content, and credentials are never returned.

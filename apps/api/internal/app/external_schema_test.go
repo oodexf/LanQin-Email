@@ -187,6 +187,7 @@ func TestTelegramNotificationExternalSchemaContract(t *testing.T) {
 			"event_key VARCHAR(255) NOT NULL UNIQUE",
 			"idx_telegram_notification_outbox_due",
 			"idx_telegram_notification_outbox_user",
+			"ai_status VARCHAR(16) NOT NULL DEFAULT ''",
 		} {
 			if !strings.Contains(schema, fragment) {
 				t.Errorf("%s Telegram notification schema is missing %q", name, fragment)
@@ -202,8 +203,8 @@ func TestTelegramNotificationExternalSchemaContract(t *testing.T) {
 		if !strings.Contains(statement, "telegram_notification_") {
 			t.Errorf("v4 migration contains unrelated statement: %.80s", statement)
 		}
-		// V6 adds the lease columns; creating them here as well breaks the V6 upgrade.
-		if strings.Contains(statement, "lease_") {
+		// V6 adds the lease columns and V14 adds ai_status; creating them here as well breaks those upgrades.
+		if strings.Contains(statement, "lease_") || strings.Contains(statement, "ai_status") {
 			t.Errorf("v4 migration must create the v4 table, not the current one: %.80s", statement)
 		}
 	}

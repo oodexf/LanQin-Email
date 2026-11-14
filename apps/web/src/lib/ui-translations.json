@@ -5918,5 +5918,21 @@
     "en": "Permissions: IMAP.AccessAsUser.All, SMTP.Send, offline_access. Existing accounts must be reauthorized before they can send",
     "zh-TW": "權限：IMAP.AccessAsUser.All、SMTP.Send、offline_access；已接入的帳號需重新授權後才能寄件"
   },
-  "不支持的邮箱服务商": { "en": "Unsupported mail provider", "zh-TW": "不支援的郵箱服務商" }
+  "不支持的邮箱服务商": { "en": "Unsupported mail provider", "zh-TW": "不支援的郵箱服務商" },
+  "AI 摘要（邮件内容将发送给 AI 服务）": {
+    "zh-TW": "AI 摘要（郵件內容將傳送給 AI 服務）",
+    "en": "AI summary (mail content is sent to the AI service)"
+  },
+  "AI 摘要语言": {
+    "zh-TW": "AI 摘要語言",
+    "en": "AI summary language"
+  },
+  "发送 Telegram 通知（AI 摘要 · {0}）": {
+    "zh-TW": "傳送 Telegram 通知（AI 摘要 · {0}）",
+    "en": "Send a Telegram notification (AI summary · {0})"
+  },
+  "AI 摘要服务未启用": {
+    "zh-TW": "AI 摘要服務未啟用",
+    "en": "AI summaries are not enabled"
+  }
 }
