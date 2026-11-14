@@ -816,56 +816,60 @@ func (a *App) handleMailMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 type mailComposeInput struct {
-	MailboxID   string            `json:"mailboxId"`
-	From        string            `json:"from"`
-	FromName    string            `json:"fromName"`
-	To          []string          `json:"to"`
-	CC          []string          `json:"cc"`
-	BCC         []string          `json:"bcc"`
-	Subject     string            `json:"subject"`
-	Text        string            `json:"text"`
-	HTML        string            `json:"html"`
-	Attachments []AttachmentInput `json:"attachments"`
+	ExternalAccountID string            `json:"externalAccountId,omitempty"`
+	MailboxID         string            `json:"mailboxId"`
+	From              string            `json:"from"`
+	FromName          string            `json:"fromName"`
+	To                []string          `json:"to"`
+	CC                []string          `json:"cc"`
+	BCC               []string          `json:"bcc"`
+	Subject           string            `json:"subject"`
+	Text              string            `json:"text"`
+	HTML              string            `json:"html"`
+	Attachments       []AttachmentInput `json:"attachments"`
 }
 
 type mailDraftInput struct {
-	MailboxID   string             `json:"mailboxId"`
-	To          []string           `json:"to"`
-	CC          []string           `json:"cc"`
-	BCC         []string           `json:"bcc"`
-	Subject     string             `json:"subject"`
-	Text        string             `json:"text"`
-	HTML        string             `json:"html"`
-	Attachments *[]AttachmentInput `json:"attachments"`
+	ExternalAccountID string             `json:"externalAccountId,omitempty"`
+	MailboxID         string             `json:"mailboxId"`
+	To                []string           `json:"to"`
+	CC                []string           `json:"cc"`
+	BCC               []string           `json:"bcc"`
+	Subject           string             `json:"subject"`
+	Text              string             `json:"text"`
+	HTML              string             `json:"html"`
+	Attachments       *[]AttachmentInput `json:"attachments"`
 }
 
 type scheduledSendPayload struct {
-	MailboxID   string            `json:"mailboxId"`
-	From        string            `json:"from"`
-	FromName    string            `json:"fromName"`
-	To          []string          `json:"to"`
-	CC          []string          `json:"cc"`
-	BCC         []string          `json:"bcc"`
-	Subject     string            `json:"subject"`
-	Text        string            `json:"text"`
-	HTML        string            `json:"html"`
-	Attachments []AttachmentInput `json:"attachments"`
-	DraftID     string            `json:"draftId,omitempty"`
+	ExternalAccountID string            `json:"externalAccountId,omitempty"`
+	MailboxID         string            `json:"mailboxId"`
+	From              string            `json:"from"`
+	FromName          string            `json:"fromName"`
+	To                []string          `json:"to"`
+	CC                []string          `json:"cc"`
+	BCC               []string          `json:"bcc"`
+	Subject           string            `json:"subject"`
+	Text              string            `json:"text"`
+	HTML              string            `json:"html"`
+	Attachments       []AttachmentInput `json:"attachments"`
+	DraftID           string            `json:"draftId,omitempty"`
 }
 
 type ScheduledSend struct {
-	ID        string     `json:"id"`
-	MailboxID string     `json:"mailboxId"`
-	DraftID   string     `json:"draftId,omitempty"`
-	Subject   string     `json:"subject"`
-	To        []string   `json:"to"`
-	Snippet   string     `json:"snippet"`
-	SendAt    time.Time  `json:"sendAt"`
-	Status    string     `json:"status"`
-	Error     string     `json:"error,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
-	UpdatedAt time.Time  `json:"updatedAt"`
-	SentAt    *time.Time `json:"sentAt,omitempty"`
+	ExternalAccountID string     `json:"externalAccountId,omitempty"`
+	ID                string     `json:"id"`
+	MailboxID         string     `json:"mailboxId"`
+	DraftID           string     `json:"draftId,omitempty"`
+	Subject           string     `json:"subject"`
+	To                []string   `json:"to"`
+	Snippet           string     `json:"snippet"`
+	SendAt            time.Time  `json:"sendAt"`
+	Status            string     `json:"status"`
+	Error             string     `json:"error,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	SentAt            *time.Time `json:"sentAt,omitempty"`
 }
 
 func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
@@ -876,6 +880,10 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	}
 	mb, err := a.mailboxForCurrentUserWithID(r, req.MailboxID)
 	if err != nil {
+		if strings.TrimSpace(req.ExternalAccountID) != "" {
+			respondError(w, 403, errExternalSender.Error())
+			return
+		}
 		respondError(w, http.StatusNotFound, "mailbox not found")
 		return
 	}
@@ -897,7 +905,7 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusTooManyRequests, err.Error())
 			return
 		}
-		if errors.Is(err, errSenderNotAuthorized) {
+		if errors.Is(err, errSenderNotAuthorized) || errors.Is(err, errExternalSender) {
 			respondError(w, http.StatusForbidden, err.Error())
 			return
 		}
@@ -906,6 +914,10 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ExternalAccountID) != "" {
+		respondJSON(w, http.StatusAccepted, map[string]any{"queued": true, "queueId": msg.ID, "externalAccountId": strings.TrimSpace(req.ExternalAccountID)})
 		return
 	}
 	respondJSON(w, http.StatusCreated, msg)
@@ -960,14 +972,26 @@ func (a *App) sendMailWithSource(ctx context.Context, user *User, mb *Mailbox, r
 	}
 
 	now := a.now().UTC()
-	fromAddress, fromName, err := a.authorizedSender(ctx, mb, req.From)
+	var fromAddress, fromName string
+	var account externalIMAPAccountRecord
+	var err error
+	req.ExternalAccountID = strings.TrimSpace(req.ExternalAccountID)
+	if req.ExternalAccountID != "" {
+		account, err = a.authorizedExternalSender(ctx, user, mb, req.ExternalAccountID)
+		fromAddress, fromName = account.SendAddress, account.Name
+		if strings.TrimSpace(req.FromName) != "" {
+			fromName = strings.TrimSpace(req.FromName)
+		}
+	} else {
+		fromAddress, fromName, err = a.authorizedSender(ctx, mb, req.From)
+		if strings.TrimSpace(req.FromName) != "" && normalizeEmail(req.From) == normalizeEmail(mb.Address) {
+			fromName = strings.TrimSpace(req.FromName)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(req.FromName) != "" && normalizeEmail(req.From) == normalizeEmail(mb.Address) {
-		fromName = strings.TrimSpace(req.FromName)
-	}
-	messageID := fmt.Sprintf("<%s@%s>", newID("msg"), strings.Split(mb.Address, "@")[1])
+	messageID := fmt.Sprintf("<%s@%s>", newID("msg"), domainPart(fromAddress))
 	// Charge the send quota before building the MIME message: BuildMIME encodes every
 	// attachment, so doing it first let a user who is already over their limit burn
 	// that work on every rejected attempt.
@@ -981,6 +1005,15 @@ func (a *App) sendMailWithSource(ctx context.Context, user *User, mb *Mailbox, r
 		return nil, fmt.Errorf("%w: %v", errInvalidMIME, err)
 	}
 
+	if req.ExternalAccountID != "" {
+		queueID, err := a.enqueueSend(ctx, sendQueueInput{Route: "external", ExternalAccountID: account.ID, SentCopyStatus: "none", UserID: user.ID, MailboxID: mb.ID, MessageID: messageID, Source: source, MailFrom: fromAddress, HeaderFrom: fromAddress, Recipients: allRecipients, MIMEBytes: mimeBytes, Now: now})
+		if err != nil {
+			return nil, errors.New("failed to enqueue delivery")
+		}
+		// The caller returns this queue reference as a 202 response. No local Sent
+		// message or local delivery is created for an external route.
+		return &MailMessage{ID: queueID}, nil
+	}
 	sentFolderID, err := a.ensureFolder(ctx, mb.ID, "Sent")
 	if err != nil {
 		return nil, fmt.Errorf("failed to load sent folder: %w", err)
@@ -1258,9 +1291,20 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	mb, err := a.mailboxForCurrentUserWithID(r, req.MailboxID)
 	if err != nil {
+		if strings.TrimSpace(req.ExternalAccountID) != "" {
+			respondError(w, 403, errExternalSender.Error())
+			return
+		}
 		respondError(w, http.StatusNotFound, "mailbox not found")
 		return
 	}
+	if strings.TrimSpace(req.ExternalAccountID) != "" {
+		if _, err := a.authorizedExternalSender(r.Context(), currentUser(r), mb, req.ExternalAccountID); err != nil {
+			respondError(w, 403, errExternalSender.Error())
+			return
+		}
+	}
+
 	if req.Attachments != nil {
 		if err := validateAttachmentLimit(*req.Attachments, userLimits(currentUser(r))); err != nil {
 			if errors.Is(err, errAttachmentTooLarge) || errors.Is(err, errTooManyAttachments) || errors.Is(err, errInvalidMIME) {
@@ -1714,7 +1758,7 @@ func parseTimeQuery(raw string) (time.Time, error) {
 
 func validSendQueueStatus(status string) bool {
 	switch status {
-	case sendQueueStatusQueued, sendQueueStatusSending, sendQueueStatusDelivered, sendQueueStatusFailed, sendQueueStatusCanceled:
+	case sendQueueStatusQueued, sendQueueStatusSending, sendQueueStatusDelivered, sendQueueStatusFailed, sendQueueStatusCanceled, sendQueueStatusUnconfirmed:
 		return true
 	default:
 		return false
@@ -1723,16 +1767,19 @@ func validSendQueueStatus(status string) bool {
 
 func (a *App) handleScheduleSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		MailboxID   string            `json:"mailboxId"`
-		To          []string          `json:"to"`
-		CC          []string          `json:"cc"`
-		BCC         []string          `json:"bcc"`
-		Subject     string            `json:"subject"`
-		Text        string            `json:"text"`
-		HTML        string            `json:"html"`
-		Attachments []AttachmentInput `json:"attachments"`
-		DraftID     string            `json:"draftId"`
-		SendAt      string            `json:"sendAt"`
+		ExternalAccountID string            `json:"externalAccountId"`
+		From              string            `json:"from"`
+		FromName          string            `json:"fromName"`
+		MailboxID         string            `json:"mailboxId"`
+		To                []string          `json:"to"`
+		CC                []string          `json:"cc"`
+		BCC               []string          `json:"bcc"`
+		Subject           string            `json:"subject"`
+		Text              string            `json:"text"`
+		HTML              string            `json:"html"`
+		Attachments       []AttachmentInput `json:"attachments"`
+		DraftID           string            `json:"draftId"`
+		SendAt            string            `json:"sendAt"`
 	}
 	if err := a.decodeComposeJSON(r, &req); err != nil {
 		badRequest(w, err)
@@ -1740,9 +1787,20 @@ func (a *App) handleScheduleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	mb, err := a.mailboxForCurrentUserWithID(r, req.MailboxID)
 	if err != nil {
+		if strings.TrimSpace(req.ExternalAccountID) != "" {
+			respondError(w, 403, errExternalSender.Error())
+			return
+		}
 		respondError(w, http.StatusNotFound, "mailbox not found")
 		return
 	}
+	if strings.TrimSpace(req.ExternalAccountID) != "" {
+		if _, err := a.authorizedExternalSender(r.Context(), currentUser(r), mb, req.ExternalAccountID); err != nil {
+			respondError(w, 403, errExternalSender.Error())
+			return
+		}
+	}
+
 	sendAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.SendAt))
 	if err != nil {
 		badRequest(w, errors.New("sendAt is required"))
@@ -1752,7 +1810,7 @@ func (a *App) handleScheduleSend(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, errors.New("sendAt must be in the future"))
 		return
 	}
-	compose := mailComposeInput{MailboxID: req.MailboxID, To: req.To, CC: req.CC, BCC: req.BCC, Subject: req.Subject, Text: req.Text, HTML: req.HTML, Attachments: req.Attachments}
+	compose := mailComposeInput{ExternalAccountID: req.ExternalAccountID, From: req.From, FromName: req.FromName, MailboxID: req.MailboxID, To: req.To, CC: req.CC, BCC: req.BCC, Subject: req.Subject, Text: req.Text, HTML: req.HTML, Attachments: req.Attachments}
 	if err := validateAttachmentLimit(compose.Attachments, userLimits(currentUser(r))); err != nil {
 		if errors.Is(err, errAttachmentTooLarge) || errors.Is(err, errTooManyAttachments) || errors.Is(err, errInvalidMIME) {
 			badRequest(w, err)
@@ -1762,7 +1820,12 @@ func (a *App) handleScheduleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	compose.To, compose.CC, compose.BCC = dedupeEmails(compose.To), dedupeEmails(compose.CC), dedupeEmails(compose.BCC)
-	if len(append(append([]string{}, compose.To...), append(compose.CC, compose.BCC...)...)) == 0 {
+	count := len(append(append([]string{}, compose.To...), append(compose.CC, compose.BCC...)...))
+	if count > maxRecipientsPerMessage {
+		badRequest(w, errTooManyRecipients)
+		return
+	}
+	if count == 0 {
 		badRequest(w, errNoRecipients)
 		return
 	}
@@ -1785,8 +1848,8 @@ func (a *App) handleScheduleSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := a.now().UTC().Format(time.RFC3339Nano)
-	payload := scheduledSendPayload{MailboxID: compose.MailboxID, From: compose.From, FromName: compose.FromName, To: compose.To, CC: compose.CC, BCC: compose.BCC, Subject: compose.Subject, Text: compose.Text, HTML: compose.HTML, Attachments: compose.Attachments, DraftID: draftID}
-	item := ScheduledSend{ID: newID("sched"), MailboxID: mb.ID, DraftID: draftID, Subject: payload.Subject, To: payload.To, Snippet: snippetFrom(payload.Text, payload.HTML), SendAt: sendAt.UTC(), Status: "pending", CreatedAt: parseTime(now), UpdatedAt: parseTime(now)}
+	payload := scheduledSendPayload{ExternalAccountID: compose.ExternalAccountID, MailboxID: compose.MailboxID, From: compose.From, FromName: compose.FromName, To: compose.To, CC: compose.CC, BCC: compose.BCC, Subject: compose.Subject, Text: compose.Text, HTML: compose.HTML, Attachments: compose.Attachments, DraftID: draftID}
+	item := ScheduledSend{ExternalAccountID: compose.ExternalAccountID, ID: newID("sched"), MailboxID: mb.ID, DraftID: draftID, Subject: payload.Subject, To: payload.To, Snippet: snippetFrom(payload.Text, payload.HTML), SendAt: sendAt.UTC(), Status: "pending", CreatedAt: parseTime(now), UpdatedAt: parseTime(now)}
 	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO scheduled_sends(id,user_id,mailbox_id,draft_id,payload_json,send_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, currentUser(r).ID, mb.ID, nullableString(draftID), jsonEncode(payload), item.SendAt.Format(time.RFC3339Nano), item.Status, now, now); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to schedule send")
 		return
@@ -1804,6 +1867,7 @@ func applyScheduledSendPreview(item *ScheduledSend, payloadJSON string) {
 	if item.Subject == "" {
 		item.Subject = "(no subject)"
 	}
+	item.ExternalAccountID = payload.ExternalAccountID
 	item.To = payload.To
 	item.Snippet = snippetFrom(payload.Text, payload.HTML)
 }
@@ -1918,12 +1982,17 @@ func (a *App) processScheduledSend(ctx context.Context, id, mailboxID, draftID, 
 		a.markScheduledSendFailed(ctx, id, "mailbox not found")
 		return
 	}
-	user, err := a.userByID(ctx, mb.UserID)
-	if err != nil || !userHasPermission(user, PermissionMailSchedule) || !userHasPermission(user, PermissionMailSend) {
+	var creatorID string
+	if err := a.db.QueryRowContext(ctx, `SELECT user_id FROM scheduled_sends WHERE id=?`, id).Scan(&creatorID); err != nil {
 		a.markScheduledSendFailed(ctx, id, "mail send permission revoked")
 		return
 	}
-	compose := mailComposeInput{MailboxID: payload.MailboxID, To: payload.To, CC: payload.CC, BCC: payload.BCC, Subject: payload.Subject, Text: payload.Text, HTML: payload.HTML, Attachments: payload.Attachments}
+	user, err := a.userByID(ctx, creatorID)
+	if err != nil || user.Disabled || mb.UserID != creatorID || !userHasPermission(user, PermissionMailSchedule) || !userHasPermission(user, PermissionMailSend) {
+		a.markScheduledSendFailed(ctx, id, "mail send permission revoked")
+		return
+	}
+	compose := mailComposeInput{ExternalAccountID: payload.ExternalAccountID, From: payload.From, FromName: payload.FromName, MailboxID: payload.MailboxID, To: payload.To, CC: payload.CC, BCC: payload.BCC, Subject: payload.Subject, Text: payload.Text, HTML: payload.HTML, Attachments: payload.Attachments}
 	if _, err := a.sendMailNow(ctx, user, mb, compose); err != nil {
 		a.markScheduledSendFailed(ctx, id, err.Error())
 		return

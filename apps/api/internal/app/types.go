@@ -312,6 +312,17 @@ type MailStatsFolderCount struct {
 }
 
 type ExternalIMAPAccount struct {
+	SendEnabled     bool       `json:"sendEnabled"`
+	SMTPHost        string     `json:"smtpHost"`
+	SMTPPort        int        `json:"smtpPort"`
+	SMTPTLSMode     string     `json:"smtpTlsMode"`
+	SMTPUsername    string     `json:"smtpUsername"`
+	SMTPPasswordSet bool       `json:"smtpPasswordSet"`
+	SentCopyMode    string     `json:"sentCopyMode"`
+	SendAddress     string     `json:"sendAddress"`
+	CanSend         bool       `json:"canSend"`
+	AuthStatus      string     `json:"authStatus"`
+	ProviderPreset  string     `json:"providerPreset"`
 	ID              string     `json:"id"`
 	UserID          string     `json:"userId,omitempty"`
 	MailboxID       string     `json:"mailboxId"`

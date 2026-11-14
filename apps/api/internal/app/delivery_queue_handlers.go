@@ -13,6 +13,7 @@ import (
 )
 
 type AdminDeliveryQueueItem struct {
+	Route         string `json:"route"`
 	ID            string `json:"id"`
 	QueueType     string `json:"queueType"`
 	Status        string `json:"status"`
@@ -59,22 +60,22 @@ func (a *App) handleAdminDeliveryQueue(w http.ResponseWriter, r *http.Request) {
 		statusFilter = "all"
 	}
 	validTypes := map[string]bool{"all": true, "send": true, "webhook": true, "telegram": true}
-	validStatuses := map[string]bool{"all": true, "pending": true, "failed": true, "delivered": true, "canceled": true}
+	validStatuses := map[string]bool{"unconfirmed": true, "all": true, "pending": true, "failed": true, "delivered": true, "canceled": true}
 	if !validTypes[typeFilter] || !validStatuses[statusFilter] {
 		badRequest(w, errors.New("invalid queue filter"))
 		return
 	}
 
 	queries := []string{
-		`SELECT id,'send' AS queue_type,
-			CASE WHEN delivered_at IS NOT NULL OR status='delivered' THEN 'delivered' WHEN status='canceled' THEN 'canceled' WHEN status='failed' THEN 'failed' ELSE 'pending' END AS queue_status,
+		`SELECT id,route,'send' AS queue_type,
+			CASE WHEN delivered_at IS NOT NULL OR status='delivered' THEN 'delivered' WHEN status='unconfirmed' THEN 'unconfirmed' WHEN status='canceled' THEN 'canceled' WHEN status='failed' THEN 'failed' ELSE 'pending' END AS queue_status,
 			attempt_count,max_attempts,next_attempt_at,last_error,created_at,updated_at,COALESCE(delivered_at,'') AS delivered_at
 			FROM send_queue`,
-		`SELECT id,'webhook' AS queue_type,
+		`SELECT id,'relay' AS route,'webhook' AS queue_type,
 			CASE WHEN delivered_at IS NOT NULL THEN 'delivered' WHEN attempt_count>=10 THEN 'failed' ELSE 'pending' END AS queue_status,
 			attempt_count,10 AS max_attempts,next_attempt_at,last_error,created_at,updated_at,COALESCE(delivered_at,'') AS delivered_at
 			FROM status_webhook_outbox`,
-		`SELECT id,'telegram' AS queue_type,
+		`SELECT id,'relay' AS route,'telegram' AS queue_type,
 			CASE WHEN delivered_at IS NOT NULL THEN 'delivered' WHEN attempt_count>=10 THEN 'failed' ELSE 'pending' END AS queue_status,
 			attempt_count,10 AS max_attempts,next_attempt_at,last_error,created_at,updated_at,COALESCE(delivered_at,'') AS delivered_at
 			FROM telegram_notification_outbox`,
@@ -94,7 +95,7 @@ func (a *App) handleAdminDeliveryQueue(w http.ResponseWriter, r *http.Request) {
 		where = append(where, "queue_status=?")
 		args = append(args, statusFilter)
 	}
-	base := "SELECT id,queue_type,queue_status,attempt_count,max_attempts,next_attempt_at,last_error,created_at,updated_at,delivered_at FROM (" + union + ") q WHERE " + strings.Join(where, " AND ")
+	base := "SELECT id,route,queue_type,queue_status,attempt_count,max_attempts,next_attempt_at,last_error,created_at,updated_at,delivered_at FROM (" + union + ") q WHERE " + strings.Join(where, " AND ")
 	var total int
 	if err := a.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM ("+union+") q WHERE "+strings.Join(where, " AND "), args...).Scan(&total); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to count delivery queue")
@@ -110,7 +111,7 @@ func (a *App) handleAdminDeliveryQueue(w http.ResponseWriter, r *http.Request) {
 	items := []AdminDeliveryQueueItem{}
 	for rows.Next() {
 		var item AdminDeliveryQueueItem
-		if err := rows.Scan(&item.ID, &item.QueueType, &item.Status, &item.AttemptCount, &item.MaxAttempts, &item.NextAttemptAt, &item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.DeliveredAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Route, &item.QueueType, &item.Status, &item.AttemptCount, &item.MaxAttempts, &item.NextAttemptAt, &item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.DeliveredAt); err != nil {
 			respondError(w, http.StatusInternalServerError, "failed to scan delivery queue")
 			return
 		}
@@ -159,9 +160,9 @@ func (a *App) adminDeliveryQueueMutation(w http.ResponseWriter, r *http.Request,
 	switch queueType {
 	case "send":
 		if retry {
-			res, err = a.db.ExecContext(r.Context(), `UPDATE send_queue SET status='queued',attempt_count=0,next_attempt_at=?,last_error='',updated_at=?,delivered_at=NULL,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status='failed' AND delivered_at IS NULL AND `+lease, now, now, id, now)
+			res, err = a.db.ExecContext(r.Context(), `UPDATE send_queue SET status='queued',attempt_count=0,next_attempt_at=?,last_error='',updated_at=?,delivered_at=NULL,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status='failed' AND (route<>'external' OR mime_base64<>'') AND delivered_at IS NULL AND `+lease, now, now, id, now)
 		} else {
-			res, err = a.db.ExecContext(r.Context(), `UPDATE send_queue SET status='canceled',last_error='',updated_at=?,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status IN ('queued','failed') AND delivered_at IS NULL AND `+lease, now, id, now)
+			res, err = a.db.ExecContext(r.Context(), `UPDATE send_queue SET status='canceled',mime_base64=CASE WHEN route='external' AND sent_copy_status<>'pending' THEN '' ELSE mime_base64 END,last_error='',updated_at=?,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status IN ('queued','failed') AND delivered_at IS NULL AND `+lease, now, id, now)
 		}
 	case "webhook", "telegram":
 		table := "status_webhook_outbox"

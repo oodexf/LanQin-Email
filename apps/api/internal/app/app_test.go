@@ -320,7 +320,7 @@ func (c *testClient) doWithHeaders(method, path string, body any, headers map[st
 	}
 	defer resp.Body.Close()
 	for _, cookie := range resp.Cookies() {
-		if strings.Contains(cookie.Name, "lanqin") && cookie.Value != "" {
+		if strings.Contains(cookie.Name, "lanqin") && !strings.HasSuffix(cookie.Name, "_external_mail_oauth") && cookie.Value != "" {
 			c.cookie = cookie
 		}
 	}
@@ -1023,7 +1023,7 @@ func TestExternalIMAPOAuthStateDoesNotDefaultToLocalMailbox(t *testing.T) {
 		t.Fatalf("start oauth code=%d url=%q", code, start.URL)
 	}
 	stateValue := mustOAuthStateFromURL(t, start.URL)
-	state, err := a.decryptExternalIMAPOAuthState(stateValue)
+	state, err := loadTestExternalMailOAuthState(t, a, stateValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func TestExternalIMAPOAuthStateDoesNotDefaultToLocalMailbox(t *testing.T) {
 		t.Fatalf("start oauth with email code=%d url=%q", code, start.URL)
 	}
 	stateValue = mustOAuthStateFromURL(t, start.URL)
-	state, err = a.decryptExternalIMAPOAuthState(stateValue)
+	state, err = loadTestExternalMailOAuthState(t, a, stateValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,7 +1069,7 @@ func TestExternalIMAPOAuthEmailFromIDToken(t *testing.T) {
 }
 
 func TestExternalIMAPXOAUTH2ClientFormat(t *testing.T) {
-	client := newExternalIMAPXOAUTH2Client("user@example.com", "access-token")
+	client := newExternalMailXOAUTH2Client("user@example.com", "access-token")
 	mech, initialResponse, err := client.Start()
 	if err != nil {
 		t.Fatal(err)

@@ -1,4 +1,5 @@
 import { DomainCollectionDialog } from "@/components/domain-collection-dialog"
+import { BackupDestinationsSection } from "@/components/backup-destinations-section"
 import { localizePermissionInfo, permissionMessages } from "@/lib/permission-translations"
 import { dnsCheckMessage, dnsStatusLabel } from "@/lib/diagnostic-messages"
 import { uiMessage, type UiText, uiText, useLanguage as useUiLanguage } from "@/lib/language"
@@ -134,7 +135,7 @@ export function AdminPage() {
   const canSettingsUpdate = hasPermission(user, "admin.settings.update")
   const canTemplatesView = hasPermission(user, "admin.templates.view")
   const visibleSections = sectionKeys.filter((key) =>
-    hasAnyPermission(user, sectionPermissions[key])
+    key === "backups" ? user?.role === "admin" : hasAnyPermission(user, sectionPermissions[key])
   )
   const rawSection = params.get("section") as Section | null
   const section: Section =
@@ -279,6 +280,7 @@ export function AdminPage() {
         {section === "settings" && (
           <SystemSettingsSection settings={settings.data} domains={domainItems} />
         )}
+        {section === "backups" && user?.role === "admin" && <BackupDestinationsSection />}
       </main>
     </ScrollArea>
   )
@@ -2171,8 +2173,16 @@ function AdminDeliveryQueueSection({
         failed: "失败",
         delivered: "已投递",
         canceled: "已取消",
+        unconfirmed: "结果待确认",
       }) as Record<string, string>
     )[value] || value
+  const typeLabel = (item: (typeof items)[number]) =>
+    item.queueType === "send" && item.route === "external"
+      ? "发信（外部邮箱）"
+      : label(item.queueType)
+  // An unconfirmed external send may already have reached recipients; only its owner resolves it.
+  const statusVariant = (item: (typeof items)[number]) =>
+    item.status === "failed" || item.status === "unconfirmed" ? "destructive" : "secondary"
   return (
     <Card>
       <CardHeader>
@@ -2203,6 +2213,7 @@ function AdminDeliveryQueueSection({
                 <SelectItem value="failed">{uiText("失败")}</SelectItem>
                 <SelectItem value="delivered">{uiText("已投递")}</SelectItem>
                 <SelectItem value="canceled">{uiText("已取消")}</SelectItem>
+                <SelectItem value="unconfirmed">{uiText("结果待确认")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -2214,12 +2225,10 @@ function AdminDeliveryQueueSection({
             <div key={`${item.queueType}:${item.id}`} className="rounded-lg border p-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="font-medium">{uiText(label(item.queueType))}</div>
+                  <div className="font-medium">{uiText(typeLabel(item))}</div>
                   <div className="truncate text-xs text-muted-foreground">{item.id}</div>
                 </div>
-                <Badge variant={item.status === "failed" ? "destructive" : "secondary"}>
-                  {uiText(label(item.status))}
-                </Badge>
+                <Badge variant={statusVariant(item)}>{uiText(label(item.status))}</Badge>
               </div>
               <div className="mt-3 space-y-1 text-xs text-muted-foreground">
                 <div>{uiText("尝试：{0}/{1}", [item.attemptCount, item.maxAttempts])}</div>
@@ -2246,7 +2255,7 @@ function AdminDeliveryQueueSection({
                     {uiText("重试")}
                   </Button>
                 )}
-                {canUpdate && item.status !== "delivered" && (
+                {canUpdate && item.status !== "delivered" && item.status !== "unconfirmed" && (
                   <Button
                     size="sm"
                     variant="ghost"
@@ -2277,14 +2286,12 @@ function AdminDeliveryQueueSection({
             <TableBody>
               {filtered.map((item) => (
                 <TableRow key={`${item.queueType}:${item.id}`}>
-                  <TableCell>{uiText(label(item.queueType))}</TableCell>
+                  <TableCell>{uiText(typeLabel(item))}</TableCell>
                   <TableCell className="max-w-[220px] truncate" title={item.id}>
                     {item.id}
                   </TableCell>
                   <TableCell>
-                    <Badge variant={item.status === "failed" ? "destructive" : "secondary"}>
-                      {uiText(label(item.status))}
-                    </Badge>
+                    <Badge variant={statusVariant(item)}>{uiText(label(item.status))}</Badge>
                   </TableCell>
                   <TableCell>
                     {uiText("{0}", [item.attemptCount])}/{uiText("{0}", [item.maxAttempts])}
@@ -2313,16 +2320,18 @@ function AdminDeliveryQueueSection({
                           {uiText("重试")}
                         </Button>
                       )}
-                      {canUpdate && item.status !== "delivered" && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => cancel.mutate(item)}
-                          disabled={cancel.isPending}
-                        >
-                          {uiText("取消")}
-                        </Button>
-                      )}
+                      {canUpdate &&
+                        item.status !== "delivered" &&
+                        item.status !== "unconfirmed" && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => cancel.mutate(item)}
+                            disabled={cancel.isPending}
+                          >
+                            {uiText("取消")}
+                          </Button>
+                        )}
                     </div>
                   </TableCell>
                 </TableRow>
@@ -2894,6 +2903,11 @@ function SystemSettingsSection({
                         (settings?.publicBaseUrl || "${LANQIN_PUBLIC_BASE_URL}").replace(/\/$/, ""),
                       ])}
                     </div>
+                    <div className="text-xs text-muted-foreground">
+                      {uiText(
+                        "作用域：https://mail.google.com/；发布状态不要使用“测试”，否则授权 7 天后失效"
+                      )}
+                    </div>
                   </div>
                   <div className="grid gap-4 md:grid-cols-2">
                     <Field
@@ -2922,6 +2936,11 @@ function SystemSettingsSection({
                       {uiText("回调地址：{0}/api/external-imap-oauth/outlook/callback", [
                         (settings?.publicBaseUrl || "${LANQIN_PUBLIC_BASE_URL}").replace(/\/$/, ""),
                       ])}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {uiText(
+                        "权限：IMAP.AccessAsUser.All、SMTP.Send、offline_access；已接入的账号需重新授权后才能发件"
+                      )}
                     </div>
                   </div>
                   <div className="grid gap-4 md:grid-cols-2">

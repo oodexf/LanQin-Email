@@ -296,6 +296,7 @@ export type MailTranslation = {
 }
 export type SendPayload = {
   mailboxId?: string
+  externalAccountId?: string
   to: string[]
   cc: string[]
   bcc: string[]
@@ -366,7 +367,8 @@ export type SendQueueAuditEvent = {
 export type AdminDeliveryQueueItem = {
   id: string
   queueType: "send" | "webhook" | "telegram"
-  status: "pending" | "failed" | "delivered" | "canceled"
+  route?: "relay" | "external"
+  status: "pending" | "failed" | "delivered" | "canceled" | "unconfirmed"
   attemptCount: number
   maxAttempts: number
   nextAttemptAt?: string
@@ -468,6 +470,9 @@ export type MailStats = {
 export type ExternalImapStorageMode = "local" | "remote"
 export type ExternalImapTlsMode = "tls" | "starttls" | "plain"
 export type ExternalImapAuthMode = "password" | "oauth2"
+export type ExternalImapAuthStatus = "ok" | "needs_reauth"
+export type ExternalSmtpTlsMode = "tls" | "starttls"
+export type ExternalSentCopyMode = "server" | "append" | "none"
 export type ExternalImapAccount = {
   id: string
   mailboxId: string
@@ -480,6 +485,17 @@ export type ExternalImapAccount = {
   oauthProvider?: ExternalImapOAuthProvider
   oauthEmail?: string
   oauthConfigured?: boolean
+  authStatus?: ExternalImapAuthStatus
+  providerPreset?: string
+  sendEnabled?: boolean
+  smtpHost?: string
+  smtpPort?: number
+  smtpTlsMode?: ExternalSmtpTlsMode | ""
+  smtpUsername?: string
+  smtpPasswordSet?: boolean
+  sentCopyMode?: ExternalSentCopyMode
+  sendAddress?: string
+  canSend?: boolean
   storageMode: ExternalImapStorageMode
   syncReadState: boolean
   enabled: boolean
@@ -500,10 +516,47 @@ export type ExternalImapAccountPayload = {
   storageMode: ExternalImapStorageMode
   syncReadState: boolean
   enabled: boolean
+  sendEnabled?: boolean
+  smtpHost?: string
+  smtpPort?: number
+  smtpTlsMode?: ExternalSmtpTlsMode
+  smtpUsername?: string
+  smtpPassword?: string
+  sentCopyMode?: ExternalSentCopyMode
+  providerPreset?: string
 }
+export type ExternalMailProvider = {
+  id: string
+  name: string
+  authMethods: ("oauth2" | "app_password")[]
+  oauthProvider: ExternalImapOAuthProvider | ""
+  oauthConfigured: boolean
+  imapHost: string
+  imapPort: number
+  imapTlsMode: ExternalImapTlsMode
+  smtpHost: string
+  smtpPort: number
+  smtpTlsMode: ExternalSmtpTlsMode | ""
+  sentCopyMode: ExternalSentCopyMode
+  requiresImapId: boolean
+}
+export type ExternalSendStatus =
+  "queued" | "sending" | "delivered" | "failed" | "unconfirmed" | "canceled"
+export type ExternalSendRecord = {
+  id: string
+  status: ExternalSendStatus
+  subject: string
+  recipients: string[]
+  createdAt: string
+  updatedAt: string
+  lastError?: string
+  sentCopyStatus?: "none" | "pending" | "done" | "failed"
+}
+export type ExternalSendQueued = { queued: true; queueId: string; externalAccountId: string }
 export type ExternalImapOAuthProvider = "gmail" | "outlook"
 export type ExternalImapOAuthStartPayload = {
   mailboxId: string
+  accountId?: string
   name?: string
   email?: string
   storageMode: ExternalImapStorageMode
@@ -673,6 +726,230 @@ export type RegistrationInvite = {
   createdAt: string
 }
 export type LinuxDoIdentity = { linked: boolean; username?: string }
+export type BackupS3Settings = {
+  endpoint: string
+  region: string
+  bucket: string
+  prefix: string
+  pathStyle: boolean
+}
+export type BackupDestination = {
+  id: string
+  name: string
+  type: "s3" | "webdav" | "drive"
+  disabled: boolean
+  credentialsSet: boolean
+  sessionTokenSet: boolean
+  lastSuccessAt?: string
+  keepLast: number
+  s3?: BackupS3Settings
+  webdav?: { url: string }
+  drive?: { folderId: string }
+}
+export type BackupSchedulePeriod = "daily" | "hourly" | "weekly" | "monthly" | "interval"
+export type BackupScheduleUnit = "minutes" | "hours" | "days"
+export type BackupSchedule = {
+  destinationId: string
+  enabled: boolean
+  time: string
+  timezone: string
+  period?: BackupSchedulePeriod
+  minute?: number
+  weekdays?: number[]
+  dayOfMonth?: number
+  interval?: number
+  unit?: BackupScheduleUnit
+  nextRunAt?: string
+  lastJobId?: string
+  lastErrorCode?: string
+}
+export type BackupScheduleList = { revision: string; items: BackupSchedule[] }
+export type BackupSchedulePayload = {
+  revision: string
+  destinationsRevision: string
+  expectedRecipient: string
+  enabled: boolean
+  time?: string
+  timezone: string
+  period?: BackupSchedulePeriod
+  minute?: number
+  weekdays?: number[]
+  dayOfMonth?: number
+  interval?: number
+  unit?: BackupScheduleUnit
+}
+
+export type BackupEncryptionConfiguration = {
+  mode: "password" | "key"
+  configured: boolean
+  passwordSet: boolean
+  recipient: string
+  revision: string
+  environmentKeyConfigured: boolean
+}
+
+export type BackupArtifact = {
+  version: number
+  id: string
+  sha256: string
+  bytes: number
+  publishedAt: string
+}
+export type BackupUploadJob = {
+  id: string
+  kind?: "upload" | "snapshot" | "restore" | "discover"
+  phase?:
+    | "queued"
+    | "collecting"
+    | "encrypting"
+    | "uploading"
+    | "retaining"
+    | "downloading"
+    | "decrypting"
+    | "discovering"
+    | "completed"
+  recipient?: string
+  summary?: {
+    snapshotStarted: string
+    snapshotFinished: string
+    attempts: number
+    messages: number
+    drafts: number
+    attachments: number
+    unindexed: number
+    dkimKeys: number
+    externalCachedMessagesOnly: number
+    bytesBeforeReport: number
+  }
+  artifact: BackupArtifact
+  status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled" | "interrupted"
+  createdAt: string
+  startedAt?: string
+  completedAt?: string
+  destinationNames: string[]
+  locations: {
+    id: string
+    name: string
+    type: string
+    endpoint: string
+    bucket?: string
+    prefix?: string
+    region?: string
+    folderId?: string
+  }[]
+  results: {
+    destination_id: string
+    state: string
+    attempts: number
+    object_key?: string
+    error_code?: string
+    completed_at?: string
+    index_state?: "succeeded" | "failed"
+    index_error_code?: string
+  }[]
+  cancelRequested: boolean
+  canResume?: boolean
+  resumeCount?: number
+  transfers?: Record<string, { phase: string; bytes: number; total: number; cleanupError?: string }>
+  resumeAudit?: {
+    at: string
+    actorId: string
+    previousStatus: string
+    previousErrorCode?: string
+  }[]
+  retention?: { destinationId: string; deleted: number; errorCode?: string }[]
+  pruned?: Record<string, { state: "pending" | "deleted" | "missing"; at: string; jobId: string }>
+  restore?: {
+    sourceJobId: string
+    destinationId: string
+    ready: boolean
+    manifest?: { version: number; scope: string; driver: string; created: string }
+  }
+  discovery?: { count: number; ready: boolean; sourceFolderId?: string }
+  errorCode?: string
+}
+export type BackupDiscoveryEntry = {
+  id: string
+  originalDestinationId: string
+  objectKey: string
+  sha256: string
+  bytes: number
+  completedAt: string
+}
+export type BackupMaintenancePlan = {
+  id: string
+  templateSHA256: string
+  driver: string
+  queueQuarantine: boolean
+}
+export type BackupMaintenancePlans = { available: boolean; items: BackupMaintenancePlan[] }
+export type BackupMaintenanceStatus = {
+  version: number
+  id: string
+  planId: string
+  webJob: string
+  state: "queued" | "preparing" | "maintaining" | "succeeded" | "failed" | "needsRecovery"
+  phase: "queued" | "preparing" | "importing" | "maintenance" | "completed" | "interrupted"
+  errorCode?: string
+  createdAt: string
+  updatedAt: string
+  progress?: {
+    step:
+      | "queued"
+      | "checking-source"
+      | "copying"
+      | "checking-copy"
+      | "importing"
+      | "preflight"
+      | "stopping"
+      | "installing"
+      | "validating"
+      | "committing"
+      | "starting"
+      | "health-check"
+      | "rolling-back"
+      | "recovering-original"
+      | "completed"
+    startedAt: string
+  }
+}
+export type BackupDriveClientConfiguration = {
+  source: "environment" | "database" | "none"
+  configured: boolean
+  editable: boolean
+  clientId: string
+  clientSecretSet: boolean
+  revision: string
+  redirectUri: string
+}
+export type BackupDriveClientPayload = {
+  revision: string
+  clientId: string
+  clientSecret: string
+}
+export type BackupDiscoveryPage = {
+  items: BackupDiscoveryEntry[]
+  nextCursor?: string
+}
+export type BackupDestinationList = {
+  encryptionConfigured: boolean
+  revision: string
+  items: BackupDestination[]
+}
+export type BackupDestinationPayload = {
+  revision: string
+  name: string
+  type: "s3" | "webdav" | "drive"
+  disabled: boolean
+  s3?: BackupS3Settings & {
+    accessKeyId?: string
+    secretAccessKey?: string
+    sessionToken?: string
+    clearSessionToken?: boolean
+  }
+  webdav?: { url: string; username?: string; password?: string }
+  drive?: Record<string, never>
+}
 export type LinuxDoPendingRegistration = {
   username: string
   displayName: string

@@ -1,22 +1,26 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
-	sendQueueStatusQueued    = "queued"
-	sendQueueStatusSending   = "sending"
-	sendQueueStatusDelivered = "delivered"
-	sendQueueStatusFailed    = "failed"
-	sendQueueStatusCanceled  = "canceled"
+	sendQueueStatusUnconfirmed = "unconfirmed"
+	sendQueueStatusQueued      = "queued"
+	sendQueueStatusSending     = "sending"
+	sendQueueStatusDelivered   = "delivered"
+	sendQueueStatusFailed      = "failed"
+	sendQueueStatusCanceled    = "canceled"
 
 	sendAuditAccepted  = "accepted"
 	sendAuditQueued    = "queued"
@@ -38,36 +42,54 @@ const (
 )
 
 type sendQueueInput struct {
-	UserID        string
-	MailboxID     string
-	SentMessageID string
-	MessageID     string
-	Source        string
-	MailFrom      string
-	HeaderFrom    string
-	Recipients    []string
-	MIMEBytes     []byte
-	Now           time.Time
+	Route             string
+	ExternalAccountID string
+	SentCopyStatus    string
+	UserID            string
+	MailboxID         string
+	SentMessageID     string
+	MessageID         string
+	Source            string
+	MailFrom          string
+	HeaderFrom        string
+	Recipients        []string
+	MIMEBytes         []byte
+	Now               time.Time
 }
 
 type sendQueueItem struct {
-	ID            string
-	UserID        string
-	MailboxID     string
-	SentMessageID string
-	MessageID     string
-	Source        string
-	MailFrom      string
-	HeaderFrom    string
-	Recipients    []string
-	MIMEBytes     []byte
-	AttemptCount  int
-	MaxAttempts   int
-	LeaseToken    string
+	Route             string
+	ExternalAccountID string
+	SentCopyStatus    string
+	ID                string
+	UserID            string
+	MailboxID         string
+	SentMessageID     string
+	MessageID         string
+	Source            string
+	MailFrom          string
+	HeaderFrom        string
+	Recipients        []string
+	MIMEBytes         []byte
+	AttemptCount      int
+	MaxAttempts       int
+	LeaseToken        string
 }
 
 func (a *App) enqueueSend(ctx context.Context, in sendQueueInput) (string, error) {
-	if strings.TrimSpace(a.cfg.SMTPHost) == "" {
+	if in.Route == "" {
+		in.Route = "relay"
+	}
+	if in.SentCopyStatus == "" {
+		in.SentCopyStatus = "none"
+	}
+	if in.Route != "relay" && in.Route != "external" {
+		return "", errors.New("invalid send route")
+	}
+	if in.Route == "external" && in.ExternalAccountID == "" {
+		return "", errExternalSender
+	}
+	if in.Route == "relay" && strings.TrimSpace(a.cfg.SMTPHost) == "" {
 		return "", nil
 	}
 	now := in.Now.UTC()
@@ -78,21 +100,24 @@ func (a *App) enqueueSend(ctx context.Context, in sendQueueInput) (string, error
 	messageID := strings.TrimSpace(in.MessageID)
 	mimeBase64 := base64.StdEncoding.EncodeToString(in.MIMEBytes)
 	recipientsJSON := jsonEncode(dedupeEmails(in.Recipients))
-	query := insertIgnoreSQL(a.cfg.DBDriver, `INSERT INTO send_queue(id,user_id,mailbox_id,sent_message_id,message_id,source,mail_from,header_from,recipients_json,mime_base64,status,next_attempt_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, `(mailbox_id,source,message_id) WHERE message_id<>''`)
+	query := insertIgnoreSQL(a.cfg.DBDriver, `INSERT INTO send_queue(id,user_id,mailbox_id,sent_message_id,message_id,source,mail_from,header_from,recipients_json,mime_base64,status,next_attempt_at,created_at,updated_at,route,external_account_id,sent_copy_status,subject)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, `(mailbox_id,source,message_id) WHERE message_id<>''`)
 	_, err := a.db.ExecContext(ctx, query,
-		id, in.UserID, in.MailboxID, in.SentMessageID, messageID, in.Source, normalizeEmail(in.MailFrom), normalizeEmail(in.HeaderFrom), recipientsJSON, mimeBase64, sendQueueStatusQueued, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		id, in.UserID, in.MailboxID, in.SentMessageID, messageID, in.Source, normalizeEmail(in.MailFrom), normalizeEmail(in.HeaderFrom), recipientsJSON, mimeBase64, sendQueueStatusQueued, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), in.Route, nullableString(in.ExternalAccountID), in.SentCopyStatus, externalSendSubject(in.Route, in.MIMEBytes))
 	if err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(messageID) != "" {
-		var existingID, status string
+		var existingID, status, existingRoute, existingAccount string
 		var attemptCount, maxAttempts int
-		if err := a.db.QueryRowContext(ctx, `SELECT id,status,attempt_count,max_attempts FROM send_queue WHERE mailbox_id=? AND source=? AND message_id=?`, in.MailboxID, in.Source, messageID).Scan(&existingID, &status, &attemptCount, &maxAttempts); err != nil {
+		if err := a.db.QueryRowContext(ctx, `SELECT id,status,attempt_count,max_attempts,route,COALESCE(external_account_id,'') FROM send_queue WHERE mailbox_id=? AND source=? AND message_id=?`, in.MailboxID, in.Source, messageID).Scan(&existingID, &status, &attemptCount, &maxAttempts, &existingRoute, &existingAccount); err != nil {
 			return "", err
 		}
+		if existingRoute != in.Route || (in.Route == "external" && existingAccount != in.ExternalAccountID) {
+			return "", errors.New("send route conflict")
+		}
 		if existingID != id {
-			if status == sendQueueStatusDelivered || status == sendQueueStatusCanceled || (status == sendQueueStatusFailed && attemptCount >= maxAttempts) {
+			if in.Route == "relay" && (status == sendQueueStatusDelivered || status == sendQueueStatusCanceled || (status == sendQueueStatusFailed && attemptCount >= maxAttempts)) {
 				_, err := a.db.ExecContext(ctx, `UPDATE send_queue SET user_id=?,sent_message_id=?,mail_from=?,header_from=?,recipients_json=?,mime_base64=?,status=?,attempt_count=0,next_attempt_at=?,last_error='',updated_at=?,delivered_at=NULL,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=?`,
 					in.UserID, in.SentMessageID, normalizeEmail(in.MailFrom), normalizeEmail(in.HeaderFrom), recipientsJSON, mimeBase64, sendQueueStatusQueued, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), existingID, status)
 				if err != nil {
@@ -150,13 +175,14 @@ func (a *App) sendQueueWorker(ctx context.Context) {
 }
 
 func (a *App) processDueSendQueue(ctx context.Context) error {
-	if strings.TrimSpace(a.cfg.SMTPHost) == "" {
-		return nil
-	}
 	if err := a.recoverStaleSendQueueItems(ctx); err != nil {
 		return err
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT id FROM send_queue WHERE (status=? OR (status=? AND attempt_count<max_attempts)) AND next_attempt_at<=? ORDER BY next_attempt_at, created_at LIMIT 20`, sendQueueStatusQueued, sendQueueStatusFailed, a.now().UTC().Format(time.RFC3339Nano))
+	relayEnabled := 0
+	if strings.TrimSpace(a.cfg.SMTPHost) != "" {
+		relayEnabled = 1
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT id FROM send_queue WHERE (route='external' OR ?=1) AND (status=? OR (status=? AND attempt_count<max_attempts)) AND next_attempt_at<=? ORDER BY next_attempt_at, created_at LIMIT 20`, relayEnabled, sendQueueStatusQueued, sendQueueStatusFailed, a.now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -195,13 +221,17 @@ func (a *App) processDueSendQueue(ctx context.Context) error {
 		case <-done:
 		}
 	}
-	return nil
+	return a.processPendingExternalSentCopies(ctx)
 }
 
 func (a *App) recoverStaleSendQueueItems(ctx context.Context) error {
 	cutoff := a.now().UTC().Add(-sendQueueStaleAfter).Format(time.RFC3339Nano)
 	nowText := a.now().UTC().Format(time.RFC3339Nano)
-	rows, err := a.db.QueryContext(ctx, `SELECT id,user_id,mailbox_id,sent_message_id,message_id,source,mail_from,header_from,recipients_json,mime_base64,attempt_count,max_attempts,lease_token FROM send_queue WHERE status=? AND (lease_until<=? OR (lease_until IS NULL AND updated_at<=?)) AND attempt_count<max_attempts LIMIT 20`, sendQueueStatusSending, nowText, cutoff)
+	relayEnabled := 0
+	if strings.TrimSpace(a.cfg.SMTPHost) != "" {
+		relayEnabled = 1
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT id,user_id,mailbox_id,sent_message_id,message_id,source,mail_from,header_from,recipients_json,mime_base64,attempt_count,max_attempts,lease_token,route,COALESCE(external_account_id,''),sent_copy_status FROM send_queue WHERE status=? AND (lease_until<=? OR (lease_until IS NULL AND updated_at<=?)) AND (route='external' OR attempt_count<max_attempts) AND (route='external' OR ?=1) LIMIT 20`, sendQueueStatusSending, nowText, cutoff, relayEnabled)
 	if err != nil {
 		return err
 	}
@@ -210,7 +240,7 @@ func (a *App) recoverStaleSendQueueItems(ctx context.Context) error {
 	for rows.Next() {
 		var item sendQueueItem
 		var recipientsJSON, mimeBase64 string
-		if err := rows.Scan(&item.ID, &item.UserID, &item.MailboxID, &item.SentMessageID, &item.MessageID, &item.Source, &item.MailFrom, &item.HeaderFrom, &recipientsJSON, &mimeBase64, &item.AttemptCount, &item.MaxAttempts, &item.LeaseToken); err != nil {
+		if err := rows.Scan(&item.ID, &item.UserID, &item.MailboxID, &item.SentMessageID, &item.MessageID, &item.Source, &item.MailFrom, &item.HeaderFrom, &recipientsJSON, &mimeBase64, &item.AttemptCount, &item.MaxAttempts, &item.LeaseToken, &item.Route, &item.ExternalAccountID, &item.SentCopyStatus); err != nil {
 			return err
 		}
 		item.Recipients = jsonDecodeSlice(recipientsJSON)
@@ -239,17 +269,26 @@ func (a *App) recoverStaleSendQueueItems(ctx context.Context) error {
 			return err
 		}
 		if delivered {
+			if item.Route == "external" {
+				if account, err := a.externalIMAPAccountForUser(ctx, item.UserID, item.ExternalAccountID); err == nil && account.SentCopyMode == "append" {
+					item.SentCopyStatus = "pending"
+				}
+			}
 			if err := a.markSendQueueDelivered(ctx, item); err != nil {
 				return err
 			}
 			continue
 		}
-		res, err := a.db.ExecContext(ctx, `UPDATE send_queue SET status=?,next_attempt_at=?,last_error=?,updated_at=?,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=? AND lease_token=?`, sendQueueStatusQueued, now, "send attempt interrupted", now, item.ID, sendQueueStatusSending, item.LeaseToken)
+		status, code := sendQueueStatusQueued, "send attempt interrupted"
+		if item.Route == "external" {
+			status, code = sendQueueStatusUnconfirmed, "external_smtp_unconfirmed"
+		}
+		res, err := a.db.ExecContext(ctx, `UPDATE send_queue SET status=?,next_attempt_at=?,last_error=?,updated_at=?,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=? AND lease_token=?`, status, now, code, now, item.ID, sendQueueStatusSending, item.LeaseToken)
 		if err != nil {
 			return err
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
-			a.recordSendAudit(ctx, sendAuditRetry, sendQueueStatusQueued, sendAuditInputFromQueue(item, "send attempt interrupted"))
+			a.recordSendAudit(ctx, sendAuditRetry, status, sendAuditInputFromQueue(item, code))
 		}
 	}
 	return nil
@@ -263,8 +302,27 @@ func (a *App) processSendQueueItem(ctx context.Context, id string) {
 		}
 		return
 	}
-	if err := a.sendSMTP(item.MailFrom, item.Recipients, item.MIMEBytes); err != nil {
-		a.markSendQueueFailed(ctx, item, err)
+	if item.Route == "external" {
+		mode, err := a.sendViaExternalSMTP(ctx, item)
+		if err != nil {
+			a.markSendQueueFailed(ctx, item, err)
+			return
+		}
+		item.SentCopyStatus = "none"
+		if mode == "append" {
+			item.SentCopyStatus = "pending"
+		}
+	} else if item.Route == "relay" {
+		if strings.TrimSpace(a.cfg.SMTPHost) == "" {
+			a.markSendQueueFailed(ctx, item, errors.New("relay unavailable"))
+			return
+		}
+		if err := a.sendSMTP(item.MailFrom, item.Recipients, item.MIMEBytes); err != nil {
+			a.markSendQueueFailed(ctx, item, err)
+			return
+		}
+	} else {
+		a.markSendQueueFailed(ctx, item, &externalSMTPError{code: "external_account_unavailable", permanent: true})
 		return
 	}
 	if err := a.writeSendQueueDeliveredMarker(item.ID); err != nil {
@@ -277,8 +335,11 @@ func (a *App) processSendQueueItem(ctx context.Context, id string) {
 }
 
 func (a *App) markSendQueueDelivered(ctx context.Context, item sendQueueItem) error {
+	if item.SentCopyStatus == "" {
+		item.SentCopyStatus = "none"
+	}
 	now := a.now().UTC().Format(time.RFC3339Nano)
-	res, err := a.db.ExecContext(ctx, `UPDATE send_queue SET status=?,delivered_at=?,updated_at=?,last_error='',mime_base64='',lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=? AND lease_token=?`, sendQueueStatusDelivered, now, now, item.ID, sendQueueStatusSending, item.LeaseToken)
+	res, err := a.db.ExecContext(ctx, `UPDATE send_queue SET status=?,delivered_at=?,updated_at=?,last_error='',sent_copy_status=?,mime_base64=CASE WHEN ?='pending' THEN mime_base64 ELSE '' END,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=? AND lease_token=?`, sendQueueStatusDelivered, now, now, item.SentCopyStatus, item.SentCopyStatus, item.ID, sendQueueStatusSending, item.LeaseToken)
 	if err != nil {
 		return err
 	}
@@ -304,8 +365,8 @@ func (a *App) claimSendQueueItem(ctx context.Context, id string) (sendQueueItem,
 	}
 	var item sendQueueItem
 	var recipientsJSON, mimeBase64 string
-	row := a.db.QueryRowContext(ctx, `SELECT id,user_id,mailbox_id,sent_message_id,message_id,source,mail_from,header_from,recipients_json,mime_base64,attempt_count,max_attempts,lease_token FROM send_queue WHERE id=? AND lease_token=?`, id, leaseToken)
-	if err := row.Scan(&item.ID, &item.UserID, &item.MailboxID, &item.SentMessageID, &item.MessageID, &item.Source, &item.MailFrom, &item.HeaderFrom, &recipientsJSON, &mimeBase64, &item.AttemptCount, &item.MaxAttempts, &item.LeaseToken); err != nil {
+	row := a.db.QueryRowContext(ctx, `SELECT id,user_id,mailbox_id,sent_message_id,message_id,source,mail_from,header_from,recipients_json,mime_base64,attempt_count,max_attempts,lease_token,route,COALESCE(external_account_id,''),sent_copy_status FROM send_queue WHERE id=? AND lease_token=?`, id, leaseToken)
+	if err := row.Scan(&item.ID, &item.UserID, &item.MailboxID, &item.SentMessageID, &item.MessageID, &item.Source, &item.MailFrom, &item.HeaderFrom, &recipientsJSON, &mimeBase64, &item.AttemptCount, &item.MaxAttempts, &item.LeaseToken, &item.Route, &item.ExternalAccountID, &item.SentCopyStatus); err != nil {
 		return sendQueueItem{}, err
 	}
 	item.Recipients = jsonDecodeSlice(recipientsJSON)
@@ -324,7 +385,20 @@ func (a *App) markSendQueueFailed(ctx context.Context, item sendQueueItem, sendE
 	if item.AttemptCount >= item.MaxAttempts {
 		nextAttempt = now.Add(365 * 24 * time.Hour)
 	}
-	res, err := a.db.ExecContext(ctx, `UPDATE send_queue SET status=?,next_attempt_at=?,last_error=?,updated_at=?,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=? AND lease_token=?`, status, nextAttempt.Format(time.RFC3339Nano), sendErr.Error(), now.Format(time.RFC3339Nano), item.ID, sendQueueStatusSending, item.LeaseToken)
+	var externalErr *externalSMTPError
+	if item.Route == "external" {
+		if !errors.As(sendErr, &externalErr) {
+			externalErr = &externalSMTPError{code: "external_smtp_temporary"}
+		}
+		sendErr = externalErr
+		if externalErr.permanent {
+			item.AttemptCount = item.MaxAttempts
+		}
+		if externalErr.unconfirmed {
+			status = sendQueueStatusUnconfirmed
+		}
+	}
+	res, err := a.db.ExecContext(ctx, `UPDATE send_queue SET status=?,attempt_count=?,next_attempt_at=?,last_error=?,updated_at=?,mime_base64=CASE WHEN route='external' AND ?='failed' AND ?>=max_attempts AND sent_copy_status<>'pending' THEN '' ELSE mime_base64 END,lease_owner='',lease_token='',lease_until=NULL WHERE id=? AND status=? AND lease_token=?`, status, item.AttemptCount, nextAttempt.Format(time.RFC3339Nano), sendErr.Error(), now.Format(time.RFC3339Nano), status, item.AttemptCount, item.ID, sendQueueStatusSending, item.LeaseToken)
 	if err != nil {
 		a.log.Warn("failed to mark send queue failed", "id", item.ID, "error", err)
 		return
@@ -477,4 +551,26 @@ func (a *App) authorizedSender(ctx context.Context, mb *Mailbox, from string) (s
 		}
 	}
 	return "", "", errSenderNotAuthorized
+}
+
+// Store only a bounded, decoded display subject; listing sends never loads MIME.
+func externalSendSubject(route string, raw []byte) string {
+	if route != "external" {
+		return ""
+	}
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return ""
+	}
+	subject := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, decodeMIMEHeader(message.Header.Get("Subject")))
+	runes := []rune(subject)
+	if len(runes) > 300 {
+		runes = runes[:300]
+	}
+	return string(runes)
 }

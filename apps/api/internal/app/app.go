@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,30 +20,48 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
+	"lanqin-email-api/internal/backup/storage"
 )
 
 type App struct {
-	collectionMu       sync.Mutex
-	cfg                Config
-	db                 *sql.DB
-	log                *slog.Logger
-	now                func() time.Time
-	policy             *HTMLPolicy
-	workerCancel       context.CancelFunc
-	workerWG           sync.WaitGroup
-	health             *appHealthState
-	maildirHealth      *maildirSyncHealthTracker
-	maildirSyncMu      sync.Mutex
-	maildirDirs        map[string]maildirDirectorySignature
-	maildirRuns        uint64
-	syncEventsMu       sync.Mutex
-	syncEventClients   map[chan struct{}]string
-	sseConnections     map[string]int
-	externalIMAP       externalIMAPClientFactory
-	linuxDoOAuth       linuxDoOAuthClient
-	telegramAPIBaseURL string
-	messageSearchFTS   bool
-	workerID           string
+	externalSMTPDialForTest        externalSMTPDialFunc
+	collectionMu                   sync.Mutex
+	cfg                            Config
+	db                             *sql.DB
+	log                            *slog.Logger
+	now                            func() time.Time
+	policy                         *HTMLPolicy
+	workerCancel                   context.CancelFunc
+	workerWG                       sync.WaitGroup
+	health                         *appHealthState
+	maildirHealth                  *maildirSyncHealthTracker
+	maildirSyncMu                  sync.Mutex
+	maildirDirs                    map[string]maildirDirectorySignature
+	maildirRuns                    uint64
+	syncEventsMu                   sync.Mutex
+	syncEventClients               map[chan struct{}]string
+	sseConnections                 map[string]int
+	externalIMAP                   externalIMAPClientFactory
+	externalIMAPOAuthConfigForTest func(string) (*oauth2.Config, externalIMAPOAuthProvider, error)
+	externalIMAPOAuthRefresh       singleflight.Group
+	externalSMTPRootCAsForTest     *x509.CertPool
+	linuxDoOAuth                   linuxDoOAuthClient
+	telegramAPIBaseURL             string
+	messageSearchFTS               bool
+	workerID                       string
+	backupWake                     chan struct{}
+	backupRestoreRequests          chan backupRestoreExecution
+	backupDownloadFile             func(context.Context, storage.Destination, string, string, string, storage.Options, storage.Credentials) (storage.DownloadReceipt, error)
+	backupDiscoverIndexes          func(context.Context, storage.Destination, []byte, storage.Credentials) ([]storage.RecoveryIndexEntry, error)
+	backupDriveOAuthClient         *http.Client
+	backupPrepareSnapshot          func(context.Context, Config, string, OnlineBackupOptions) (*PreparedOnlineBackup, error)
+	backupUploadFile               func(context.Context, *os.File, string, storage.Config, storage.Options, func(string) (storage.Credentials, error)) (storage.Report, error)
+	backupVerifyRemote             func(context.Context, storage.Destination, string, string, int64, storage.Credentials) error
+	backupDeleteRemote             func(context.Context, storage.Destination, string, string, int64, storage.Credentials, func(context.Context) error) error
+	backupAbortTransfer            func(context.Context, storage.Destination, storage.Checkpoint, string, int64, storage.Credentials) error
+	backupMaintenanceClientFactory func(string) backupMaintenanceClient
 }
 
 func New(cfg Config, logger *slog.Logger) (*App, error) {
@@ -50,6 +69,9 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		logger = slog.Default()
 	}
 	cfg = normalizeDatabaseConfig(cfg)
+	if err := checkRestoreActivation(cfg.DataDir); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(cfg.SiteTitle) == "" {
 		cfg.SiteTitle = "LanQin Email"
 	}
@@ -74,6 +96,15 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 
 	a := &App{cfg: cfg, db: db, log: logger, now: time.Now, policy: NewHTMLPolicy(), health: &appHealthState{}, maildirHealth: newMaildirSyncHealthTracker(), telegramAPIBaseURL: defaultTelegramAPIBaseURL, workerID: newID("worker")}
 	a.externalIMAP = a
+	a.backupWake = make(chan struct{}, 1)
+	a.backupRestoreRequests = make(chan backupRestoreExecution, 1)
+	a.backupDownloadFile = storage.Download
+	a.backupDiscoverIndexes = storage.DiscoverRecoveryIndexes
+	a.backupUploadFile = storage.UploadFile
+	a.backupVerifyRemote = storage.VerifyRemote
+	a.backupDeleteRemote = storage.DeleteVerifiedGuarded
+	a.backupAbortTransfer = storage.AbortCheckpoint
+	a.backupPrepareSnapshot = PrepareOnlineBackup
 	a.linuxDoOAuth = newLinuxDoHTTPClient()
 	if cfg.DBDriver == databaseDriverSQLite {
 		if err := a.configureSQLite(context.Background()); err != nil {
@@ -84,6 +115,12 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err := a.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if cfg.DBDriver != databaseDriverSQLite {
+		if err := checkNativeRestoreActivation(context.Background(), db, cfg.DBDriver, cfg.DataDir, cfg.MaildirRoot); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	if err := a.ensureDefaultMailTemplates(context.Background()); err != nil {
 		db.Close()
@@ -109,6 +146,10 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	a.startWorker(func() { a.externalIMAPWorker(workerCtx) })
 	a.startWorker(func() { a.smtpEventsCleanupWorker(workerCtx) })
 	a.startWorker(func() { a.sessionCleanupWorker(workerCtx) })
+	if _, err := a.backupCipher(); err == nil {
+		a.startWorker(func() { a.backupUploadWorker(workerCtx) })
+		a.startWorker(func() { a.backupScheduleWorker(workerCtx) })
+	}
 	if strings.TrimSpace(a.cfg.StatusWebhookURL) != "" {
 		a.startWorker(func() { a.statusWebhookWorker(workerCtx) })
 	}
@@ -140,6 +181,14 @@ func (a *App) Close() error {
 		a.workerCancel()
 	}
 	a.workerWG.Wait()
+	for a.backupRestoreRequests != nil {
+		select {
+		case execution := <-a.backupRestoreRequests:
+			clear(execution.Identity)
+		default:
+			return a.db.Close()
+		}
+	}
 	return a.db.Close()
 }
 
@@ -511,6 +560,11 @@ func (a *App) migrate(ctx context.Context) error {
 			mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
 			sent_message_id TEXT NOT NULL DEFAULT '',
 			message_id TEXT NOT NULL DEFAULT '',
+			route TEXT NOT NULL DEFAULT 'relay',
+			external_account_id TEXT,
+			sent_copy_status TEXT NOT NULL DEFAULT 'none',
+			sent_copy_attempt_count INTEGER NOT NULL DEFAULT 0,
+			subject TEXT NOT NULL DEFAULT '',
 			source TEXT NOT NULL,
 			mail_from TEXT NOT NULL,
 			header_from TEXT NOT NULL,
@@ -653,6 +707,17 @@ func (a *App) migrate(ctx context.Context) error {
 			oauth_access_token_ciphertext TEXT NOT NULL DEFAULT '',
 			oauth_refresh_token_ciphertext TEXT NOT NULL DEFAULT '',
 			oauth_expiry TEXT,
+			provider_preset TEXT NOT NULL DEFAULT 'custom',
+			auth_status TEXT NOT NULL DEFAULT 'ok',
+			oauth_subject TEXT NOT NULL DEFAULT '',
+			oauth_generation INTEGER NOT NULL DEFAULT 0,
+			smtp_host TEXT NOT NULL DEFAULT '',
+			smtp_port INTEGER NOT NULL DEFAULT 0,
+			smtp_tls_mode TEXT NOT NULL DEFAULT '',
+			smtp_username TEXT NOT NULL DEFAULT '',
+			smtp_password_ciphertext TEXT NOT NULL DEFAULT '',
+			send_enabled INTEGER NOT NULL DEFAULT 0,
+			sent_copy_mode TEXT NOT NULL DEFAULT 'server',
 			storage_mode TEXT NOT NULL DEFAULT 'local' CHECK(storage_mode IN ('local','remote')),
 			sync_read_state INTEGER NOT NULL DEFAULT 1,
 			enabled INTEGER NOT NULL DEFAULT 1,
@@ -664,6 +729,19 @@ func (a *App) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_imap_accounts_user_mailbox ON external_imap_accounts(user_id, mailbox_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_imap_accounts_enabled ON external_imap_accounts(enabled, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS external_mail_oauth_states (
+			token_hash TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			binding_hash TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			account_id TEXT,
+			mailbox_id TEXT NOT NULL,
+			payload_ciphertext TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used_at TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_external_mail_oauth_states_expires ON external_mail_oauth_states(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS external_imap_folder_states (
 			account_id TEXT NOT NULL REFERENCES external_imap_accounts(id) ON DELETE CASCADE,
 			remote_folder TEXT NOT NULL,

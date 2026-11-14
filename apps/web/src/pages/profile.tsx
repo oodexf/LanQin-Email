@@ -61,6 +61,9 @@ import {
   ExternalImapStorageMode,
   ExternalImapSyncRun,
   ExternalImapTlsMode,
+  ExternalSendRecord,
+  ExternalSentCopyMode,
+  ExternalSmtpTlsMode,
   ForwardAddress,
   MailboxShare,
   MailboxShareAuditEvent,
@@ -664,23 +667,33 @@ export function ProfilePage() {
     mutationFn: ({
       provider,
       mailboxId,
+      accountId,
       email,
       storageMode,
     }: {
       provider: ExternalImapOAuthProvider
       mailboxId: string
+      accountId?: string
       email: string
       storageMode: ExternalImapStorageMode
     }) =>
-      api.startExternalImapOAuth(provider, {
-        mailboxId,
-        email,
-        storageMode,
-        syncReadState: true,
-        enabled: true,
-      }),
-    onSuccess: (res) => {
-      window.location.href = res.url
+      api
+        .startExternalImapOAuth(provider, {
+          mailboxId,
+          accountId,
+          email,
+          storageMode,
+          syncReadState: true,
+          enabled: true,
+        })
+        .then((res) => ({ provider, url: res.url })),
+    onSuccess: ({ provider, url }) => {
+      const target = externalOAuthAuthorizationURL(provider, url)
+      if (!target) {
+        toast({ title: "授权失败", description: "授权地址无效，请联系管理员" })
+        return
+      }
+      window.location.assign(target)
     },
     onError: (error) => toast({ title: "授权失败", description: errorMessage(error) }),
   })
@@ -725,6 +738,44 @@ export function ProfilePage() {
     if (result === "linked") qc.invalidateQueries({ queryKey: ["linuxdo-identity"] })
     const next = new URLSearchParams(params)
     next.delete("linuxdo")
+    setParams(next, { replace: true })
+  }, [params, qc, setParams, toast])
+  React.useEffect(() => {
+    const result = params.get("externalMail")
+    if (!result) return
+    const messages: Record<string, { title: string; description?: string }> = {
+      connected: { title: "外部邮箱已接入" },
+      reauthorized: { title: "外部邮箱已重新授权" },
+      denied: { title: "已取消外部邮箱授权" },
+      invalid_state: {
+        title: "外部邮箱授权失败",
+        description: "授权状态无效或已过期，请在当前浏览器重新发起授权",
+      },
+      email_mismatch: {
+        title: "外部邮箱授权失败",
+        description: "授权的邮箱与填写的外部邮箱地址不一致",
+      },
+      account_mismatch: {
+        title: "外部邮箱授权失败",
+        description: "重新授权必须使用该外部账号原来的邮箱账户",
+      },
+      exchange_failed: {
+        title: "外部邮箱授权失败",
+        description: "无法向邮箱服务商换取授权令牌，请稍后重试",
+      },
+      not_configured: {
+        title: "外部邮箱授权失败",
+        description: "管理员尚未配置该邮箱服务商的 OAuth 客户端",
+      },
+      failed: { title: "外部邮箱授权失败", description: "授权信息保存失败，请稍后重试" },
+    }
+    toast(messages[result] || { title: "外部邮箱授权未完成" })
+    if (result === "connected" || result === "reauthorized") {
+      qc.invalidateQueries({ queryKey: ["external-imap-accounts"] })
+      qc.invalidateQueries({ queryKey: ["mail-external-accounts"] })
+    }
+    const next = new URLSearchParams(params)
+    next.delete("externalMail")
     setParams(next, { replace: true })
   }, [params, qc, setParams, toast])
 
@@ -1568,7 +1619,12 @@ function MailboxManagement({
   onCreateExternal: (payload: ExternalImapAccountPayload) => void
   onStartExternalOAuth: (
     provider: ExternalImapOAuthProvider,
-    payload: { mailboxId: string; email: string; storageMode: ExternalImapStorageMode }
+    payload: {
+      mailboxId: string
+      accountId?: string
+      email: string
+      storageMode: ExternalImapStorageMode
+    }
   ) => void
   onUpdateExternal: (id: string, payload: ExternalImapAccountPayload) => void
   onDeleteExternal: (id: string) => void
@@ -1578,6 +1634,7 @@ function MailboxManagement({
 }) {
   useUiLanguage()
   const queryClient = useQueryClient()
+  const [sendsAccountId, setSendsAccountId] = React.useState("")
 
   const push = useMutation({
     mutationFn: async (mailbox: Mailbox) => {
@@ -1705,6 +1762,10 @@ function MailboxManagement({
                               ? uiText("本地存储")
                               : uiText("远端直连")}
                           </Badge>
+                          {account.authStatus === "needs_reauth" && (
+                            <Badge variant="destructive">{uiText("需要重新授权")}</Badge>
+                          )}
+                          {account.canSend && <Badge variant="outline">{uiText("可发件")}</Badge>}
                         </div>
                         <div className="mt-1 truncate text-xs text-muted-foreground">
                           {account.username} · {account.host}:{uiText("{0}", [account.port])} ·{" "}
@@ -1726,6 +1787,25 @@ function MailboxManagement({
                         </div>
                       </div>
                       <div className="flex flex-wrap gap-2">
+                        {account.authMode === "oauth2" && account.oauthProvider && (
+                          <Button
+                            type="button"
+                            variant={account.authStatus === "needs_reauth" ? "default" : "outline"}
+                            size="sm"
+                            disabled={externalPending}
+                            onClick={() =>
+                              onStartExternalOAuth(account.oauthProvider!, {
+                                mailboxId: account.mailboxId,
+                                accountId: account.id,
+                                email: account.oauthEmail || "",
+                                storageMode: account.storageMode,
+                              })
+                            }
+                          >
+                            <KeyRound className="h-4 w-4" />
+                            {uiText("重新授权")}
+                          </Button>
+                        )}
                         <Button
                           type="button"
                           variant="outline"
@@ -1767,6 +1847,19 @@ function MailboxManagement({
                             {uiText("历史")}
                           </Button>
                         )}
+                        {account.sendEnabled && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            aria-expanded={sendsAccountId === account.id}
+                            onClick={() =>
+                              setSendsAccountId(sendsAccountId === account.id ? "" : account.id)
+                            }
+                          >
+                            {uiText("发件记录")}
+                          </Button>
+                        )}
                         <ExternalImapDialog
                           account={account}
                           mailboxId={selectedMailboxId}
@@ -1798,6 +1891,9 @@ function MailboxManagement({
                         </Button>
                       </div>
                     </div>
+                    {sendsAccountId === account.id && (
+                      <ExternalSendHistoryPanel account={account} />
+                    )}
                     {selectedForRuns && (
                       <ExternalImapSyncPanel
                         account={account}
@@ -2075,13 +2171,45 @@ function ExternalImapDialog({
   )
   const [syncReadState, setSyncReadState] = React.useState(account?.syncReadState ?? true)
   const [enabled, setEnabled] = React.useState(account?.enabled ?? true)
+  const [sendEnabled, setSendEnabled] = React.useState(account?.sendEnabled ?? false)
+  const [smtpTlsMode, setSmtpTlsMode] = React.useState<ExternalSmtpTlsMode>(
+    account?.smtpTlsMode || "tls"
+  )
+  const [sentCopyMode, setSentCopyMode] = React.useState<ExternalSentCopyMode>(
+    account?.sentCopyMode || "append"
+  )
+  // OAuth endpoints are pinned server-side; tokens must never follow an edited host.
+  const endpointsLocked = account?.authMode === "oauth2"
+  const [presetId, setPresetId] = React.useState(account?.providerPreset || "custom")
+  const providers = useQuery({
+    queryKey: ["external-mail-providers"],
+    queryFn: api.externalMailProviders,
+    enabled: open && !account,
+    staleTime: 5 * 60_000,
+  })
+  const preset = account
+    ? undefined
+    : providers.data?.items.find((item) => item.id === presetId && item.id !== "custom")
+  const passwordSupported = !preset || preset.authMethods.includes("app_password")
+  function choosePreset(id: string) {
+    setPresetId(id)
+    const next = providers.data?.items.find((item) => item.id === id)
+    if (!next || next.id === "custom") return
+    setTlsMode(next.imapTlsMode)
+    if (next.smtpTlsMode) setSmtpTlsMode(next.smtpTlsMode)
+    setSentCopyMode(next.sentCopyMode)
+  }
   React.useEffect(() => {
     if (!open) return
+    setPresetId(account?.providerPreset || "custom")
     setTlsMode(account?.tlsMode || "tls")
     setStorageMode(account?.storageMode || "local")
     setSyncReadState(account?.syncReadState ?? true)
     setEnabled(account?.enabled ?? true)
-  }, [account, open])
+    setSendEnabled(account?.sendEnabled ?? false)
+    setSmtpTlsMode(account?.smtpTlsMode || "tls")
+    setSentCopyMode(account?.sentCopyMode || (endpointsLocked ? "server" : "append"))
+  }, [account, endpointsLocked, open])
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -2093,10 +2221,24 @@ function ExternalImapDialog({
       port: Number(form.get("port") || (tlsMode === "tls" ? 993 : 143)),
       tlsMode,
       username: String(form.get("username") || ""),
-      password: String(form.get("password") || ""),
+      password: endpointsLocked ? "" : String(form.get("password") || ""),
       storageMode,
       syncReadState,
       enabled,
+      sendEnabled,
+      sentCopyMode,
+      ...(account ? {} : { providerPreset: presetId }),
+      ...(endpointsLocked
+        ? {}
+        : {
+            smtpHost: String(form.get("smtpHost") || account?.smtpHost || ""),
+            smtpPort: Number(
+              form.get("smtpPort") || account?.smtpPort || (smtpTlsMode === "tls" ? 465 : 587)
+            ),
+            smtpTlsMode,
+            smtpUsername: String(form.get("smtpUsername") || account?.smtpUsername || ""),
+            smtpPassword: String(form.get("smtpPassword") || ""),
+          }),
     }
     onSubmit(payload)
     if (!pending) setOpen(false)
@@ -2125,11 +2267,36 @@ function ExternalImapDialog({
           <DialogTitle>{account ? uiText("编辑外部 IMAP") : uiText("添加外部 IMAP")}</DialogTitle>
         </DialogHeader>
         <form className="space-y-4" onSubmit={submit}>
-          <div className="grid gap-4 sm:grid-cols-2">
+          {!account && (
+            <Field label={uiText("邮箱服务商")}>
+              <Select value={presetId} onValueChange={choosePreset}>
+                <SelectTrigger aria-label={uiText("邮箱服务商")}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(providers.data?.items || []).map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {item.id === "custom" ? uiText("其他邮箱（手动填写）") : item.name}
+                    </SelectItem>
+                  ))}
+                  {!providers.data && (
+                    <SelectItem value="custom">{uiText("其他邮箱（手动填写）")}</SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+            </Field>
+          )}
+          {preset && (
+            <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+              {uiText(externalProviderHint(preset.id))}
+            </div>
+          )}
+          {/* Remount uncontrolled endpoint fields so a preset can pre-fill them. */}
+          <div key={presetId} className="grid gap-4 sm:grid-cols-2">
             <Field label={uiText("显示名称")}>
               <Input
                 name="name"
-                defaultValue={account?.name || ""}
+                defaultValue={account?.name || preset?.name || ""}
                 placeholder={uiText("Gmail / 工作邮箱")}
               />
             </Field>
@@ -2138,14 +2305,16 @@ function ExternalImapDialog({
                 name="username"
                 defaultValue={account?.username || ""}
                 required
+                readOnly={endpointsLocked}
                 placeholder="name@example.com"
               />
             </Field>
             <Field label={uiText("服务器")}>
               <Input
                 name="host"
-                defaultValue={account?.host || ""}
+                defaultValue={account?.host || preset?.imapHost || ""}
                 required
+                readOnly={endpointsLocked}
                 placeholder="imap.example.com"
               />
             </Field>
@@ -2155,12 +2324,14 @@ function ExternalImapDialog({
                 type="number"
                 min={1}
                 max={65535}
-                defaultValue={account?.port || (tlsMode === "tls" ? 993 : 143)}
+                readOnly={endpointsLocked}
+                defaultValue={account?.port || preset?.imapPort || (tlsMode === "tls" ? 993 : 143)}
               />
             </Field>
             <Field label={uiText("加密方式")}>
               <Select
                 value={tlsMode}
+                disabled={endpointsLocked}
                 onValueChange={(value) => setTlsMode(value as ExternalImapTlsMode)}
               >
                 <SelectTrigger>
@@ -2188,13 +2359,19 @@ function ExternalImapDialog({
               </Select>
             </Field>
           </div>
-          <Field label={account ? uiText("密码（留空则不修改）") : uiText("密码")}>
-            <PasswordInput
-              name="password"
-              required={!account}
-              placeholder={account ? uiText("不修改请留空") : uiText("外部邮箱密码或授权码")}
-            />
-          </Field>
+          {endpointsLocked ? (
+            <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+              {uiText("OAuth 账号的服务器与用户名由授权确定，需更换账号请使用“重新授权”。")}
+            </div>
+          ) : (
+            <Field label={account ? uiText("密码（留空则不修改）") : uiText("密码")}>
+              <PasswordInput
+                name="password"
+                required={!account}
+                placeholder={account ? uiText("不修改请留空") : uiText("外部邮箱密码或授权码")}
+              />
+            </Field>
+          )}
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="flex items-center gap-2 rounded-lg border p-3 text-sm">
               <Checkbox
@@ -2211,17 +2388,116 @@ function ExternalImapDialog({
               {uiText("启用此账号")}
             </label>
           </div>
+          <div className="space-y-4 rounded-lg border p-3">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <Checkbox
+                checked={sendEnabled}
+                onCheckedChange={(checked) => setSendEnabled(checked === true)}
+              />
+              {uiText("允许以此账号发件")}
+            </label>
+            {sendEnabled && !endpointsLocked && (
+              <div key={presetId} className="grid gap-4 sm:grid-cols-2">
+                <Field label={uiText("SMTP 服务器")}>
+                  <Input
+                    name="smtpHost"
+                    defaultValue={account?.smtpHost || preset?.smtpHost || ""}
+                    required
+                    placeholder="smtp.example.com"
+                  />
+                </Field>
+                <Field label={uiText("SMTP 端口")}>
+                  <Input
+                    name="smtpPort"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    defaultValue={
+                      account?.smtpPort || preset?.smtpPort || (smtpTlsMode === "tls" ? 465 : 587)
+                    }
+                  />
+                </Field>
+                <Field label={uiText("SMTP 加密方式")}>
+                  <Select
+                    value={smtpTlsMode}
+                    onValueChange={(value) => setSmtpTlsMode(value as ExternalSmtpTlsMode)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="tls">SSL/TLS</SelectItem>
+                      <SelectItem value="starttls">STARTTLS</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label={uiText("SMTP 用户名")}>
+                  <Input
+                    name="smtpUsername"
+                    defaultValue={account?.smtpUsername || ""}
+                    placeholder={uiText("留空则使用 IMAP 用户名")}
+                  />
+                </Field>
+                <div className="sm:col-span-2">
+                  <Field label={uiText("SMTP 密码")}>
+                    <PasswordInput
+                      name="smtpPassword"
+                      placeholder={
+                        account?.smtpPasswordSet
+                          ? uiText("不修改请留空")
+                          : uiText("留空则使用 IMAP 密码或授权码")
+                      }
+                    />
+                  </Field>
+                </div>
+              </div>
+            )}
+            {sendEnabled && (
+              <Field label={uiText("已发送副本")}>
+                <Select
+                  value={sentCopyMode}
+                  onValueChange={(value) => setSentCopyMode(value as ExternalSentCopyMode)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="server">{uiText("由邮箱服务器自动保存")}</SelectItem>
+                    <SelectItem value="append">{uiText("追加到远端已发送文件夹")}</SelectItem>
+                    <SelectItem value="none">{uiText("不保存副本")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+          </div>
           <DialogFooter className="gap-2 [&>button]:w-full sm:[&>button]:w-auto">
             <Button type="button" variant="outline" onClick={() => setOpen(false)}>
               {uiText("取消")}
             </Button>
-            <Button disabled={pending || !mailboxId}>
+            <Button disabled={pending || !mailboxId || !passwordSupported}>
               {pending ? uiText("保存中...") : uiText("保存")}
             </Button>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function externalProviderHint(id: string) {
+  return (
+    (
+      {
+        gmail:
+          "推荐使用“Gmail OAuth”授权；如需密码方式，请先为 Google 账号开启两步验证，再生成应用专用密码。",
+        outlook:
+          "Microsoft 365 / Outlook 已停用密码登录，请关闭此窗口并使用“Microsoft 365 / Outlook OAuth”授权。",
+        yahoo: "请在 Yahoo 账号安全设置中生成应用专用密码，密码栏填写该密码。",
+        icloud: "请在 Apple 账户中生成 App 专用密码，用户名填写完整的 iCloud 邮箱地址。",
+        qq: "请在 QQ 邮箱设置中开启 IMAP/SMTP 服务并生成授权码，密码栏填写授权码。",
+        "163": "请在网易邮箱设置中开启 IMAP/SMTP 服务并获取授权码，密码栏填写授权码。",
+      } as Record<string, string>
+    )[id] || ""
   )
 }
 
@@ -2237,6 +2513,16 @@ function externalPayloadFromAccount(account: ExternalImapAccount): ExternalImapA
     storageMode: account.storageMode,
     syncReadState: account.syncReadState,
     enabled: account.enabled,
+    sendEnabled: account.sendEnabled ?? false,
+    sentCopyMode: account.sentCopyMode,
+    ...(account.authMode === "oauth2"
+      ? {}
+      : {
+          smtpHost: account.smtpHost,
+          smtpPort: account.smtpPort,
+          smtpTlsMode: account.smtpTlsMode || undefined,
+          smtpUsername: account.smtpUsername,
+        }),
   }
 }
 
@@ -2256,12 +2542,183 @@ function externalStatusLabel(status: string) {
   )
 }
 
+const externalOAuthAuthorizationEndpoints: Record<
+  ExternalImapOAuthProvider,
+  { host: string; pathname: string }
+> = {
+  gmail: { host: "accounts.google.com", pathname: "/o/oauth2/v2/auth" },
+  outlook: { host: "login.microsoftonline.com", pathname: "/common/oauth2/v2.0/authorize" },
+}
+
+// The start endpoint returns a provider URL; only follow it to the expected
+// authorization endpoint so a tampered response cannot turn into an open redirect.
+function externalOAuthAuthorizationURL(provider: ExternalImapOAuthProvider, raw: string) {
+  const expected = externalOAuthAuthorizationEndpoints[provider]
+  try {
+    const url = new URL(raw)
+    if (
+      url.protocol !== "https:" ||
+      url.host !== expected.host ||
+      url.pathname !== expected.pathname ||
+      url.username ||
+      url.password ||
+      url.hash
+    ) {
+      return ""
+    }
+    return url.href
+  } catch {
+    return ""
+  }
+}
+
 function externalOAuthProviderLabel(provider?: ExternalImapOAuthProvider) {
   return provider === "gmail"
     ? "Gmail OAuth"
     : provider === "outlook"
       ? "Microsoft 365 / Outlook OAuth"
       : "OAuth"
+}
+
+function externalSendStatusLabel(status: ExternalSendRecord["status"]) {
+  return (
+    {
+      queued: "排队中",
+      sending: "发送中",
+      delivered: "已发送",
+      failed: "发送失败",
+      unconfirmed: "结果待确认",
+      canceled: "已取消",
+    } as Record<string, string>
+  )[status]
+}
+
+function ExternalSendHistoryPanel({ account }: { account: ExternalImapAccount }) {
+  useUiLanguage()
+
+  const qc = useQueryClient()
+  const { toast } = useToast()
+  const sends = useQuery({
+    queryKey: ["external-sends", account.id],
+    queryFn: () => api.externalSends(account.id),
+    refetchInterval: (query) =>
+      query.state.data?.items.some((item) => item.status === "queued" || item.status === "sending")
+        ? 5000
+        : false,
+  })
+  const resolve = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: "delivered" | "retry" }) =>
+      api.resolveExternalSend(account.id, id, action),
+    onSuccess: (_, { action }) => {
+      qc.invalidateQueries({ queryKey: ["external-sends", account.id] })
+      toast({ title: action === "retry" ? "已重新排队发送" : "已标记为已发送" })
+    },
+    onError: (error) => toast({ title: "操作失败", description: errorMessage(error) }),
+  })
+  const [retryId, setRetryId] = React.useState("")
+  const items = sends.data?.items || []
+  return (
+    <div className="space-y-2 rounded-lg bg-muted/40 p-3">
+      <ConfirmDialog
+        open={!!retryId}
+        title={uiText("确认重新发送？")}
+        description={uiText("重新发送可能导致收件人收到重复邮件。")}
+        confirmText={uiText("重新发送")}
+        destructive
+        pending={resolve.isPending}
+        onOpenChange={(open) => {
+          if (!open) setRetryId("")
+        }}
+        onConfirm={() =>
+          resolve.mutate({ id: retryId, action: "retry" }, { onSettled: () => setRetryId("") })
+        }
+      />
+      <div className="text-xs font-medium text-muted-foreground">{uiText("最近发件记录")}</div>
+      {sends.isLoading && (
+        <div className="rounded-md border bg-background p-3 text-sm text-muted-foreground">
+          {uiText("加载中...")}
+        </div>
+      )}
+      {sends.isError && (
+        <div className="rounded-md border bg-background p-3 text-sm text-destructive">
+          {uiText(errorMessage(sends.error))}
+        </div>
+      )}
+      {sends.isSuccess && items.length === 0 && (
+        <div className="rounded-md border bg-background p-3 text-sm text-muted-foreground">
+          {uiText("暂无发件记录")}
+        </div>
+      )}
+      {items.map((item) => (
+        <div
+          key={item.id}
+          className="grid gap-2 rounded-md border bg-background p-3 text-sm md:grid-cols-[minmax(0,1fr)_auto] md:items-center"
+        >
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                variant={
+                  item.status === "delivered"
+                    ? "secondary"
+                    : item.status === "failed" || item.status === "unconfirmed"
+                      ? "destructive"
+                      : "outline"
+                }
+              >
+                {uiText(externalSendStatusLabel(item.status) || item.status)}
+              </Badge>
+              <span className="truncate" data-lanqin-i18n-ignore>
+                {item.subject || uiText("(无主题)")}
+              </span>
+            </div>
+            <div className="mt-1 truncate text-xs text-muted-foreground" data-lanqin-i18n-ignore>
+              {item.recipients.join(", ")}
+            </div>
+            {item.status === "unconfirmed" && (
+              <div className="mt-1 text-xs text-muted-foreground">
+                {uiText("邮件可能已经发出。请到外部邮箱的已发送文件夹或向收件人核实后再处理。")}
+              </div>
+            )}
+            {item.lastError && item.status !== "unconfirmed" && (
+              <div className="mt-1 truncate text-xs text-destructive">
+                {uiText(errorMessage(item.lastError))}
+              </div>
+            )}
+            {item.sentCopyStatus === "failed" && (
+              <div className="mt-1 text-xs text-muted-foreground">
+                {uiText("已发送副本保存失败")}
+              </div>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 md:justify-end">
+            <span className="text-xs text-muted-foreground">{formatDateTime(item.createdAt)}</span>
+            {item.status === "unconfirmed" && (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={resolve.isPending}
+                  onClick={() => resolve.mutate({ id: item.id, action: "delivered" })}
+                >
+                  {uiText("确认已发送")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={resolve.isPending}
+                  onClick={() => setRetryId(item.id)}
+                >
+                  {uiText("重新发送")}
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function ExternalImapSyncPanel({

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExternalFreshSchemasCoverAllTables(t *testing.T) {
@@ -345,4 +346,73 @@ func columnDeclaredIn(createTable, column string) bool {
 		}
 	}
 	return false
+}
+
+func TestExternalMailV13SchemaAndSQLiteUpgrade(t *testing.T) {
+	accountColumns := []string{"provider_preset", "auth_status", "oauth_subject", "oauth_generation", "smtp_host", "smtp_port", "smtp_tls_mode", "smtp_username", "smtp_password_ciphertext", "send_enabled", "sent_copy_mode"}
+	queueColumns := []string{"route", "external_account_id", "sent_copy_status", "sent_copy_attempt_count", "subject"}
+	for driver, statements := range map[string][]string{"postgres": postgresFreshSchema(), "mysql": mysqlFreshSchema()} {
+		for table, columns := range map[string][]string{"external_imap_accounts": accountColumns, "send_queue": queueColumns} {
+			var create string
+			for _, sql := range statements {
+				if strings.HasPrefix(sql, "CREATE TABLE "+table+" (") {
+					create = sql
+					break
+				}
+			}
+			for _, col := range columns {
+				if !columnDeclaredIn(create, col) {
+					t.Errorf("%s missing %s.%s", driver, table, col)
+				}
+			}
+			if strings.Contains(create, "external_account_id TEXT REFERENCES") || strings.Contains(create, "FOREIGN KEY (external_account_id)") {
+				t.Fatal("send route account must survive account deletion")
+			}
+		}
+		joined := strings.Join(externalSchemaV13Statements(driver), "\n")
+		if !strings.Contains(joined, "CREATE TABLE external_mail_oauth_states") || !strings.Contains(joined, "idx_external_mail_oauth_states_expires") {
+			t.Fatal("V13 state migration missing")
+		}
+		if driver == "mysql" && !strings.Contains(joined, "ADD COLUMN smtp_password_ciphertext LONGTEXT NOT NULL DEFAULT ('')") {
+			t.Fatal("MySQL upgrade differs from fresh LONGTEXT defaults")
+		}
+	}
+	// Historical table sets must stay frozen when the current set grows.
+	for _, tables := range [][]string{externalSchemaTablesV1, externalSchemaTablesV2, externalSchemaTablesV3, externalSchemaTablesV4} {
+		for _, table := range tables {
+			if table == "external_mail_oauth_states" {
+				t.Fatal("V13 table contaminated a historical table set")
+			}
+		}
+	}
+	a := newTestApp(t)
+	stopTestWorkers(a)
+	if _, err := a.db.Exec(`DROP TABLE external_mail_oauth_states`); err != nil {
+		t.Fatal(err)
+	}
+	for table, columns := range map[string][]string{"external_imap_accounts": accountColumns, "send_queue": queueColumns} {
+		for _, col := range columns {
+			if _, err := a.db.Exec("ALTER TABLE " + table + " DROP COLUMN " + col); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for range 2 {
+		if err := a.migrate(t.Context()); err != nil {
+			t.Fatalf("SQLite resumable upgrade: %v", err)
+		}
+	}
+	_, mb := defaultAdminUserAndMailbox(t, a)
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`INSERT INTO external_imap_accounts(id,user_id,mailbox_id,name,host,port,tls_mode,username,password_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "schema-v13", mb.UserID, mb.ID, "Synthetic", "imap.example.test", 993, "tls", "person@example.test", "synthetic", now, now); err != nil {
+		t.Fatal(err)
+	}
+	var preset, status, subject, smtpHost, tls, username, password, sentMode string
+	var generation, port, enabled int
+	if err := a.db.QueryRow(`SELECT provider_preset,auth_status,oauth_subject,oauth_generation,smtp_host,smtp_port,smtp_tls_mode,smtp_username,smtp_password_ciphertext,send_enabled,sent_copy_mode FROM external_imap_accounts WHERE id='schema-v13'`).Scan(&preset, &status, &subject, &generation, &smtpHost, &port, &tls, &username, &password, &enabled, &sentMode); err != nil || preset != "custom" || status != "ok" || subject != "" || generation != 0 || smtpHost != "" || port != 0 || tls != "" || username != "" || password != "" || enabled != 0 || sentMode != "server" {
+		t.Fatal("SQLite V13 defaults differ", err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO external_mail_oauth_states(token_hash,user_id,binding_hash,provider,mailbox_id,payload_ciphertext,expires_at,created_at) VALUES('synthetic',?,'binding','gmail',?,'encrypted',?,?)`, mb.UserID, mb.ID, now, now); err != nil {
+		t.Fatal("SQLite state table missing", err)
+	}
 }

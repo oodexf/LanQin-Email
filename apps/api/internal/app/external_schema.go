@@ -12,7 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-const externalSchemaVersion = 12
+const externalSchemaVersion = 13
 
 var externalSchemaTables = []string{
 	"domain_collections",
@@ -26,6 +26,7 @@ var externalSchemaTables = []string{
 	"delivery_events",
 	"domains",
 	"external_imap_accounts",
+	"external_mail_oauth_states",
 	"external_imap_folder_states",
 	"external_imap_messages",
 	"external_imap_sync_runs",
@@ -74,6 +75,17 @@ var externalSchemaTables = []string{
 // Existing unversioned databases are intentionally rejected: importing SQLite
 // data requires an explicit data migration and must never happen at startup.
 func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("external schema: reserve connection: %w", err)
+	}
+	defer conn.Close()
+	return initializeExternalSchemaOnConn(ctx, conn, driver, false)
+}
+
+// A native restore holds this same connection's schema lock until row import
+// commits, and requires an empty database rather than migrating existing data.
+func initializeExternalSchemaOnConn(ctx context.Context, conn *sql.Conn, driver string, requireEmpty bool) error {
 	driver = strings.ToLower(strings.TrimSpace(driver))
 	var statements []string
 	var migrationName string
@@ -88,12 +100,6 @@ func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) er
 		return fmt.Errorf("external schema: unsupported database driver %q", driver)
 	}
 
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("external schema: reserve connection: %w", err)
-	}
-	defer conn.Close()
-
 	unlock, err := lockExternalSchema(ctx, conn, driver)
 	if err != nil {
 		return err
@@ -103,6 +109,9 @@ func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) er
 	tables, err := listExternalSchemaTables(ctx, conn, driver)
 	if err != nil {
 		return err
+	}
+	if requireEmpty && len(tables) != 0 {
+		return errNativeDatabaseBackup
 	}
 	if len(tables) != 0 {
 		if err := migrateExternalSchemaV2(ctx, conn, driver, tables, migrationName); err != nil {
@@ -148,6 +157,9 @@ func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) er
 			return err
 		}
 		if err := migrateExternalSchemaV12(ctx, conn, driver); err != nil {
+			return err
+		}
+		if err := migrateExternalSchemaV13(ctx, conn, driver); err != nil {
 			return err
 		}
 		pushTable := strings.Replace(mailboxPushExternalTable(driver), "CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
@@ -198,7 +210,7 @@ func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) er
 	for _, migration := range []struct {
 		version int
 		name    string
-	}{{1, migrationName}, {2, "external_schema_v2_linuxdo_sso"}, {3, "external_schema_v3_registration_invites"}, {4, "external_schema_v4_telegram_notifications"}, {5, "external_schema_v5_login_rate_limits"}, {6, "external_schema_v6_queue_leases"}, {7, "external_schema_v7_message_threads"}, {8, "external_schema_v8_mailbox_quota"}, {9, "external_schema_v9_invite_groups_mailbox_rate"}, {10, "external_schema_v10_session_indexes_totp_replay"}, {11, "external_schema_v11_smtp_rate_recipients"}, {12, "external_schema_v12_domain_collection"}} {
+	}{{1, migrationName}, {2, "external_schema_v2_linuxdo_sso"}, {3, "external_schema_v3_registration_invites"}, {4, "external_schema_v4_telegram_notifications"}, {5, "external_schema_v5_login_rate_limits"}, {6, "external_schema_v6_queue_leases"}, {7, "external_schema_v7_message_threads"}, {8, "external_schema_v8_mailbox_quota"}, {9, "external_schema_v9_invite_groups_mailbox_rate"}, {10, "external_schema_v10_session_indexes_totp_replay"}, {11, "external_schema_v11_smtp_rate_recipients"}, {12, "external_schema_v12_domain_collection"}, {13, "external_schema_v13_external_mail_oauth"}} {
 		marker := fmt.Sprintf("INSERT INTO schema_migrations(version,name,applied_at) VALUES(%d,'%s',CURRENT_TIMESTAMP)", migration.version, migration.name)
 		if _, err := executor.ExecContext(ctx, marker); err != nil {
 			return fmt.Errorf("external schema: record v%d: %w", migration.version, err)
@@ -299,7 +311,7 @@ func listExternalSchemaTables(ctx context.Context, conn *sql.Conn, driver string
 	return tables, nil
 }
 
-func validateExternalSchema(ctx context.Context, conn *sql.Conn, actual []string, migrationName string) error {
+func validateExternalSchema(ctx context.Context, conn dbQueryer, actual []string, migrationName string) error {
 	expected := append([]string(nil), externalSchemaTables...)
 	sort.Strings(expected)
 	actual = append([]string(nil), actual...)
@@ -388,6 +400,9 @@ func validateExternalSchema(ctx context.Context, conn *sql.Conn, actual []string
 	}
 	if err := conn.QueryRowContext(ctx, "SELECT name FROM schema_migrations WHERE version=12").Scan(&name); err != nil || name != "external_schema_v12_domain_collection" {
 		return fmt.Errorf("external schema: invalid v12 migration marker")
+	}
+	if err := conn.QueryRowContext(ctx, "SELECT name FROM schema_migrations WHERE version=13").Scan(&name); err != nil || name != "external_schema_v13_external_mail_oauth" {
+		return fmt.Errorf("external schema: invalid v13 migration marker")
 	}
 	return nil
 }
@@ -775,4 +790,51 @@ func migrateExternalSchemaV11(ctx context.Context, conn *sql.Conn, driver string
 	return applyExternalSchemaMigration(ctx, conn, driver, 11, "external_schema_v11_smtp_rate_recipients", []string{
 		`ALTER TABLE smtp_send_events ADD COLUMN recipients INTEGER NOT NULL DEFAULT 1`,
 	})
+}
+
+// V13 contains the unreleased external mail OAuth and sending changes.
+func migrateExternalSchemaV13(ctx context.Context, conn *sql.Conn, driver string) error {
+	applied, err := externalSchemaHistory(ctx, conn, 13)
+	if err != nil || applied {
+		return err
+	}
+	return applyExternalSchemaMigration(ctx, conn, driver, 13, "external_schema_v13_external_mail_oauth", externalSchemaV13Statements(driver))
+}
+
+func externalSchemaV13Statements(driver string) []string {
+	textType := "TEXT"
+	if driver == databaseDriverMySQL {
+		textType = "LONGTEXT"
+	}
+	return []string{
+		`ALTER TABLE external_imap_accounts ADD COLUMN provider_preset ` + textType + ` NOT NULL DEFAULT ('custom')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN auth_status ` + textType + ` NOT NULL DEFAULT ('ok')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN oauth_subject ` + textType + ` NOT NULL DEFAULT ('')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN oauth_generation INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN smtp_host ` + textType + ` NOT NULL DEFAULT ('')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN smtp_port INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN smtp_tls_mode ` + textType + ` NOT NULL DEFAULT ('')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN smtp_username ` + textType + ` NOT NULL DEFAULT ('')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN smtp_password_ciphertext ` + textType + ` NOT NULL DEFAULT ('')`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN send_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE external_imap_accounts ADD COLUMN sent_copy_mode ` + textType + ` NOT NULL DEFAULT ('server')`,
+		`ALTER TABLE send_queue ADD COLUMN sent_copy_attempt_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE send_queue ADD COLUMN subject ` + textType + ` NOT NULL DEFAULT ('')`,
+		`ALTER TABLE send_queue ADD COLUMN route ` + textType + ` NOT NULL DEFAULT ('relay')`,
+		`ALTER TABLE send_queue ADD COLUMN external_account_id ` + textType,
+		`ALTER TABLE send_queue ADD COLUMN sent_copy_status ` + textType + ` NOT NULL DEFAULT ('none')`,
+		`CREATE TABLE external_mail_oauth_states (
+			token_hash VARCHAR(64) PRIMARY KEY,
+			user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			binding_hash VARCHAR(64) NOT NULL,
+			provider VARCHAR(64) NOT NULL,
+			account_id VARCHAR(64),
+			mailbox_id VARCHAR(64) NOT NULL,
+			payload_ciphertext TEXT NOT NULL,
+			expires_at VARCHAR(35) NOT NULL,
+			used_at VARCHAR(35),
+			created_at VARCHAR(35) NOT NULL
+		)`,
+		`CREATE INDEX idx_external_mail_oauth_states_expires ON external_mail_oauth_states(expires_at)`,
+	}
 }
