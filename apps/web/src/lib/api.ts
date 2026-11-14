@@ -43,6 +43,9 @@ import type {
   ExternalImapOAuthProvider,
   ExternalImapOAuthStartPayload,
   ExternalImapSyncRun,
+  ExternalMailProvider,
+  ExternalSendQueued,
+  ExternalSendRecord,
   MailboxApplyOptions,
   MailTemplate,
   MaildirSyncHealth,
@@ -342,6 +345,17 @@ export const api = {
     request<{ ok: boolean; folders: number }>(`/api/me/external-imap-accounts/${id}/test`, {
       method: "POST",
       timeoutMs: MAIL_DELIVERY_TIMEOUT_MS,
+    }),
+  externalMailProviders: () =>
+    request<ListResponse<ExternalMailProvider>>("/api/me/external-mail-providers"),
+  externalSends: (id: string) =>
+    request<ListResponse<ExternalSendRecord>>(
+      `/api/me/external-imap-accounts/${id}/sends?limit=20`
+    ),
+  resolveExternalSend: (id: string, sendId: string, action: "delivered" | "retry") =>
+    request<{ ok: boolean }>(`/api/me/external-imap-accounts/${id}/sends/${sendId}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
     }),
   externalImapSyncRuns: (id: string) =>
     request<ListResponse<ExternalImapSyncRun>>(`/api/me/external-imap-accounts/${id}/runs`),
@@ -843,7 +857,7 @@ export const api = {
       }
     ),
   send: (payload: SendPayload) =>
-    request<MailMessage>("/api/mail/send", {
+    request<MailMessage | ExternalSendQueued>("/api/mail/send", {
       method: "POST",
       body: JSON.stringify(payload),
       timeoutMs: MAIL_DELIVERY_TIMEOUT_MS,

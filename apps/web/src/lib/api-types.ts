@@ -296,6 +296,7 @@ export type MailTranslation = {
 }
 export type SendPayload = {
   mailboxId?: string
+  externalAccountId?: string
   to: string[]
   cc: string[]
   bcc: string[]
@@ -366,7 +367,8 @@ export type SendQueueAuditEvent = {
 export type AdminDeliveryQueueItem = {
   id: string
   queueType: "send" | "webhook" | "telegram"
-  status: "pending" | "failed" | "delivered" | "canceled"
+  route?: "relay" | "external"
+  status: "pending" | "failed" | "delivered" | "canceled" | "unconfirmed"
   attemptCount: number
   maxAttempts: number
   nextAttemptAt?: string
@@ -468,6 +470,9 @@ export type MailStats = {
 export type ExternalImapStorageMode = "local" | "remote"
 export type ExternalImapTlsMode = "tls" | "starttls" | "plain"
 export type ExternalImapAuthMode = "password" | "oauth2"
+export type ExternalImapAuthStatus = "ok" | "needs_reauth"
+export type ExternalSmtpTlsMode = "tls" | "starttls"
+export type ExternalSentCopyMode = "server" | "append" | "none"
 export type ExternalImapAccount = {
   id: string
   mailboxId: string
@@ -480,6 +485,17 @@ export type ExternalImapAccount = {
   oauthProvider?: ExternalImapOAuthProvider
   oauthEmail?: string
   oauthConfigured?: boolean
+  authStatus?: ExternalImapAuthStatus
+  providerPreset?: string
+  sendEnabled?: boolean
+  smtpHost?: string
+  smtpPort?: number
+  smtpTlsMode?: ExternalSmtpTlsMode | ""
+  smtpUsername?: string
+  smtpPasswordSet?: boolean
+  sentCopyMode?: ExternalSentCopyMode
+  sendAddress?: string
+  canSend?: boolean
   storageMode: ExternalImapStorageMode
   syncReadState: boolean
   enabled: boolean
@@ -500,10 +516,47 @@ export type ExternalImapAccountPayload = {
   storageMode: ExternalImapStorageMode
   syncReadState: boolean
   enabled: boolean
+  sendEnabled?: boolean
+  smtpHost?: string
+  smtpPort?: number
+  smtpTlsMode?: ExternalSmtpTlsMode
+  smtpUsername?: string
+  smtpPassword?: string
+  sentCopyMode?: ExternalSentCopyMode
+  providerPreset?: string
 }
+export type ExternalMailProvider = {
+  id: string
+  name: string
+  authMethods: ("oauth2" | "app_password")[]
+  oauthProvider: ExternalImapOAuthProvider | ""
+  oauthConfigured: boolean
+  imapHost: string
+  imapPort: number
+  imapTlsMode: ExternalImapTlsMode
+  smtpHost: string
+  smtpPort: number
+  smtpTlsMode: ExternalSmtpTlsMode | ""
+  sentCopyMode: ExternalSentCopyMode
+  requiresImapId: boolean
+}
+export type ExternalSendStatus =
+  "queued" | "sending" | "delivered" | "failed" | "unconfirmed" | "canceled"
+export type ExternalSendRecord = {
+  id: string
+  status: ExternalSendStatus
+  subject: string
+  recipients: string[]
+  createdAt: string
+  updatedAt: string
+  lastError?: string
+  sentCopyStatus?: "none" | "pending" | "done" | "failed"
+}
+export type ExternalSendQueued = { queued: true; queueId: string; externalAccountId: string }
 export type ExternalImapOAuthProvider = "gmail" | "outlook"
 export type ExternalImapOAuthStartPayload = {
   mailboxId: string
+  accountId?: string
   name?: string
   email?: string
   storageMode: ExternalImapStorageMode

@@ -226,6 +226,7 @@ type ComposeDraft = {
   key: string
   id?: string
   mailboxId?: string
+  externalAccountId?: string
   to?: string
   cc?: string
   bcc?: string
@@ -1500,10 +1501,15 @@ export function MailPage() {
     setComposeDraft(draft || { key: `new-${Date.now()}` })
     setComposeOpen(true)
   }
+  // Replies from an external mailbox default to sending through that account.
+  function replyExternalAccountId(message: MailMessage) {
+    return message.externalAccountId || (mailView === "external" ? selectedExternalAccountId : "")
+  }
   function openReply(message: MailMessage) {
     if (!canSendSelectedMailbox) return
     openCompose({
       key: `reply-${message.id}-${Date.now()}`,
+      externalAccountId: replyExternalAccountId(message),
       to: message.from,
       subject: withPrefix(message.subject, "Re:"),
       ...quoteMessage(message),
@@ -1513,6 +1519,7 @@ export function MailPage() {
     if (!canSendSelectedMailbox) return
     openCompose({
       key: `forward-${message.id}-${Date.now()}`,
+      externalAccountId: replyExternalAccountId(message),
       subject: withPrefix(message.subject, "Fwd:"),
       ...quoteMessage(message),
     })
@@ -2769,6 +2776,13 @@ export function MailPage() {
         canManageDrafts={canManageSelectedDrafts}
         canSchedule={canScheduleSelectedMailbox}
         canManageSignatures={canManageSignatures && selectedMailboxOwned}
+        externalSenders={
+          selectedMailboxOwned
+            ? externalAccountItems.filter(
+                (account) => account.canSend && account.mailboxId === selectedMailbox?.id
+              )
+            : []
+        }
         onOpenChange={(open) => {
           setComposeOpen(open)
           if (!open) setComposeDraft(undefined)
@@ -5729,6 +5743,7 @@ function ComposeDialog({
   canManageDrafts,
   canSchedule,
   canManageSignatures,
+  externalSenders,
   onOpenChange,
   onSent,
 }: {
@@ -5740,6 +5755,7 @@ function ComposeDialog({
   canManageDrafts: boolean
   canSchedule: boolean
   canManageSignatures: boolean
+  externalSenders: ExternalImapAccount[]
   onOpenChange: (v: boolean) => void
   onSent: () => void
 }) {
@@ -5779,11 +5795,17 @@ function ComposeDialog({
     draft?.html !== undefined ? htmlComposerValue(draft.html) : plainTextComposerValue(composerText)
   )
   const activeMailboxId = draft?.mailboxId || mailbox?.id || ""
+  const [senderAccountId, setSenderAccountId] = React.useState(draft?.externalAccountId || "")
+  // Only send through an account the server still reports as able to send for this mailbox.
+  const externalAccountId = externalSenders.some((account) => account.id === senderAccountId)
+    ? senderAccountId
+    : ""
   const maxAttachmentBytes = attachmentLimitBytes(limits)
   const maxAttachmentText = maxAttachmentBytes > 0 ? formatBytes(maxAttachmentBytes) : "不限"
   const composePayload = React.useMemo<DraftPayload>(
     () => ({
       mailboxId: activeMailboxId,
+      ...(externalAccountId ? { externalAccountId } : {}),
       to: splitEmails(toValue),
       cc: showCc ? splitEmails(ccValue) : [],
       bcc: showBcc ? splitEmails(bccValue) : [],
@@ -5794,6 +5816,7 @@ function ComposeDialog({
     }),
     [
       activeMailboxId,
+      externalAccountId,
       toValue,
       showCc,
       ccValue,
@@ -5816,11 +5839,11 @@ function ComposeDialog({
       body.html.trim())
   const send = useMutation({
     mutationFn: async (payloads: SendPayload[]) => {
-      const sent: MailMessage[] = []
+      const sent: Awaited<ReturnType<typeof api.send>>[] = []
       for (const payload of payloads) sent.push(await api.send(payload))
       return sent
     },
-    onSuccess: async (_, payloads) => {
+    onSuccess: async (sent, payloads) => {
       if (draftId) {
         try {
           await api.deleteDraft(draftId)
@@ -5828,9 +5851,16 @@ function ComposeDialog({
           // The draft may already have been removed by another client.
         }
       }
+      const queuedExternally = sent.some((result) => "queued" in result && result.queued)
       toast({
-        title:
-          payloads.length > 1 ? uiMessage("已分别发送 {0} 封邮件", [payloads.length]) : "发送成功",
+        title: queuedExternally
+          ? payloads.length > 1
+            ? uiMessage("已提交外部邮箱分别发送 {0} 封邮件", [payloads.length])
+            : "已提交外部邮箱发送"
+          : payloads.length > 1
+            ? uiMessage("已分别发送 {0} 封邮件", [payloads.length])
+            : "发送成功",
+        description: queuedExternally ? "发送结果可在个人中心的外部邮箱发件记录中查看" : undefined,
       })
       setFiles([])
       setDraftId("")
@@ -5878,6 +5908,7 @@ function ComposeDialog({
     })
     setDraftId(draft?.id || "")
     setToValue(draft?.to || "")
+    setSenderAccountId(draft?.externalAccountId || "")
     setCcValue(draft?.cc || "")
     setBccValue(draft?.bcc || "")
     setSubjectValue(draft?.subject || "")
@@ -5895,6 +5926,7 @@ function ComposeDialog({
     draft?.key,
     draft?.id,
     draft?.mailboxId,
+    draft?.externalAccountId,
     draft?.to,
     draft?.cc,
     draft?.bcc,
@@ -6015,6 +6047,7 @@ function ComposeDialog({
     const html = body.html || plainTextToHtml(text)
     const payload: SendPayload = {
       mailboxId: mailbox.id,
+      ...(externalAccountId ? { externalAccountId } : {}),
       to,
       cc,
       bcc,
@@ -6063,6 +6096,7 @@ function ComposeDialog({
     const attachments = await Promise.all(files.map(fileToAttachment))
     const payload: SendPayload & { draftId?: string; sendAt: string } = {
       mailboxId: mailbox.id,
+      ...(externalAccountId ? { externalAccountId } : {}),
       to: splitEmails(toValue),
       cc: showCc ? splitEmails(ccValue) : [],
       bcc: showBcc ? splitEmails(bccValue) : [],
@@ -6124,11 +6158,33 @@ function ComposeDialog({
           </DialogHeader>
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
             <ComposeField label={uiText("发件邮箱")}>
-              <Input
-                value={mailbox?.address || uiText("未选择")}
-                readOnly
-                className="h-10 min-w-0 flex-none rounded-none border-0 px-0 shadow-none focus-visible:ring-0 sm:flex-1"
-              />
+              {mailbox && externalSenders.length > 0 ? (
+                <Select
+                  value={externalAccountId || "local"}
+                  onValueChange={(value) => setSenderAccountId(value === "local" ? "" : value)}
+                >
+                  <SelectTrigger
+                    aria-label={uiText("发件邮箱")}
+                    className="h-10 min-w-0 flex-none rounded-none border-0 px-0 shadow-none focus:ring-0 sm:flex-1"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local">{mailbox.address}</SelectItem>
+                    {externalSenders.map((account) => (
+                      <SelectItem key={account.id} value={account.id}>
+                        {uiText("{0}（外部邮箱：{1}）", [account.sendAddress || "", account.name])}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : (
+                <Input
+                  value={mailbox?.address || uiText("未选择")}
+                  readOnly
+                  className="h-10 min-w-0 flex-none rounded-none border-0 px-0 shadow-none focus-visible:ring-0 sm:flex-1"
+                />
+              )}
             </ComposeField>
             <ComposeField
               label={uiText("收件人")}

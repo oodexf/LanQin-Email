@@ -5726,5 +5726,197 @@
   "上次确认的阶段耗时": {
     "zh-TW": "上次確認的階段耗時",
     "en": "Time in stage at last confirmation"
-  }
+  },
+  "授权地址无效，请联系管理员": {
+    "en": "Invalid authorization URL. Contact your administrator",
+    "zh-TW": "授權地址無效，請聯絡管理員"
+  },
+  "外部邮箱已接入": { "en": "External mailbox connected", "zh-TW": "外部郵箱已接入" },
+  "外部邮箱已重新授权": { "en": "External mailbox reauthorized", "zh-TW": "外部郵箱已重新授權" },
+  "已取消外部邮箱授权": {
+    "en": "External mailbox authorization cancelled",
+    "zh-TW": "已取消外部郵箱授權"
+  },
+  "外部邮箱授权失败": {
+    "en": "External mailbox authorization failed",
+    "zh-TW": "外部郵箱授權失敗"
+  },
+  "授权状态无效或已过期，请在当前浏览器重新发起授权": {
+    "en": "Authorization state is invalid or expired. Start the authorization again in this browser",
+    "zh-TW": "授權狀態無效或已過期，請在目前瀏覽器重新發起授權"
+  },
+  "授权的邮箱与填写的外部邮箱地址不一致": {
+    "en": "The authorized mailbox does not match the external address you entered",
+    "zh-TW": "授權的郵箱與填寫的外部郵箱地址不一致"
+  },
+  "重新授权必须使用该外部账号原来的邮箱账户": {
+    "en": "Reauthorization must use the same mailbox account as before",
+    "zh-TW": "重新授權必須使用該外部帳號原本的郵箱帳戶"
+  },
+  "无法向邮箱服务商换取授权令牌，请稍后重试": {
+    "en": "Could not obtain an authorization token from the mail provider. Try again later",
+    "zh-TW": "無法向郵箱服務商換取授權權杖，請稍後重試"
+  },
+  "管理员尚未配置该邮箱服务商的 OAuth 客户端": {
+    "en": "The administrator has not configured an OAuth client for this mail provider",
+    "zh-TW": "管理員尚未設定該郵箱服務商的 OAuth 用戶端"
+  },
+  "授权信息保存失败，请稍后重试": {
+    "en": "Failed to save the authorization. Try again later",
+    "zh-TW": "授權資訊儲存失敗，請稍後重試"
+  },
+  "外部邮箱授权未完成": {
+    "en": "External mailbox authorization was not completed",
+    "zh-TW": "外部郵箱授權未完成"
+  },
+  "需要重新授权": { "en": "Reauthorization required", "zh-TW": "需要重新授權" },
+  "重新授权": { "en": "Reauthorize", "zh-TW": "重新授權" },
+  "OAuth 账号的服务器与用户名由授权确定，需更换账号请使用“重新授权”。": {
+    "en": "The server and username of an OAuth account come from the authorization. Use “Reauthorize” to change accounts.",
+    "zh-TW": "OAuth 帳號的伺服器與使用者名稱由授權決定，需更換帳號請使用「重新授權」。"
+  },
+  "OAuth 账号的服务器与用户名不能修改": {
+    "en": "The server and username of an OAuth account cannot be changed",
+    "zh-TW": "OAuth 帳號的伺服器與使用者名稱不可修改"
+  },
+  "外部邮箱授权已失效，请重新授权": {
+    "en": "External mailbox authorization has expired. Reauthorize it",
+    "zh-TW": "外部郵箱授權已失效，請重新授權"
+  },
+  "{0}（外部邮箱：{1}）": { "en": "{0} (external mailbox: {1})", "zh-TW": "{0}（外部郵箱：{1}）" },
+  "已提交外部邮箱分别发送 {0} 封邮件": {
+    "en": "Submitted {0} separate messages through the external mailbox",
+    "zh-TW": "已提交外部郵箱分別傳送 {0} 封郵件"
+  },
+  "已提交外部邮箱发送": {
+    "en": "Submitted through the external mailbox",
+    "zh-TW": "已提交外部郵箱傳送"
+  },
+  "发送结果可在个人中心的外部邮箱发件记录中查看": {
+    "en": "Check the result in the external mailbox send history in your profile",
+    "zh-TW": "傳送結果可在個人中心的外部郵箱寄件紀錄中查看"
+  },
+  "可发件": { "en": "Can send", "zh-TW": "可寄件" },
+  "发件记录": { "en": "Send history", "zh-TW": "寄件紀錄" },
+  "允许以此账号发件": { "en": "Allow sending from this account", "zh-TW": "允許以此帳號寄件" },
+  "SMTP 端口": { "en": "SMTP port", "zh-TW": "SMTP 連接埠" },
+  "SMTP 加密方式": { "en": "SMTP encryption", "zh-TW": "SMTP 加密方式" },
+  "SMTP 用户名": { "en": "SMTP username", "zh-TW": "SMTP 使用者名稱" },
+  "留空则使用 IMAP 用户名": {
+    "en": "Leave blank to use the IMAP username",
+    "zh-TW": "留空則使用 IMAP 使用者名稱"
+  },
+  "SMTP 密码": { "en": "SMTP password", "zh-TW": "SMTP 密碼" },
+  "留空则使用 IMAP 密码或授权码": {
+    "en": "Leave blank to use the IMAP password or authorization code",
+    "zh-TW": "留空則使用 IMAP 密碼或授權碼"
+  },
+  "已发送副本": { "en": "Sent copy", "zh-TW": "已傳送副本" },
+  "由邮箱服务器自动保存": {
+    "en": "Saved automatically by the mail server",
+    "zh-TW": "由郵件伺服器自動儲存"
+  },
+  "追加到远端已发送文件夹": {
+    "en": "Append to the remote Sent folder",
+    "zh-TW": "附加到遠端寄件備份資料夾"
+  },
+  "不保存副本": { "en": "Do not keep a copy", "zh-TW": "不保存副本" },
+  "结果待确认": { "en": "Awaiting confirmation", "zh-TW": "結果待確認" },
+  "最近发件记录": { "en": "Recent sends", "zh-TW": "最近寄件紀錄" },
+  "暂无发件记录": { "en": "No sends yet", "zh-TW": "暫無寄件紀錄" },
+  "邮件可能已经发出。请到外部邮箱的已发送文件夹或向收件人核实后再处理。": {
+    "en": "The message may already have been sent. Check the external mailbox's Sent folder or confirm with the recipients before taking action.",
+    "zh-TW": "郵件可能已經寄出。請到外部郵箱的寄件備份資料夾或向收件人核實後再處理。"
+  },
+  "已发送副本保存失败": { "en": "Failed to save the sent copy", "zh-TW": "已傳送副本儲存失敗" },
+  "确认已发送": { "en": "Mark as sent", "zh-TW": "確認已傳送" },
+  "重新发送": { "en": "Resend", "zh-TW": "重新傳送" },
+  "确认重新发送？": { "en": "Resend this message?", "zh-TW": "確認重新傳送？" },
+  "重新发送可能导致收件人收到重复邮件。": {
+    "en": "Resending may deliver a duplicate message to recipients.",
+    "zh-TW": "重新傳送可能導致收件人收到重複郵件。"
+  },
+  "已重新排队发送": { "en": "Queued for resending", "zh-TW": "已重新排隊傳送" },
+  "已标记为已发送": { "en": "Marked as sent", "zh-TW": "已標記為已傳送" },
+  "发信（外部邮箱）": { "en": "Send (external mailbox)", "zh-TW": "寄信（外部郵箱）" },
+  "重新授权的邮箱服务商与账号不一致": {
+    "en": "The reauthorization provider does not match this account",
+    "zh-TW": "重新授權的郵箱服務商與帳號不一致"
+  },
+  "请完整填写 SMTP 服务器、端口与加密方式": {
+    "en": "Enter the SMTP server, port and encryption",
+    "zh-TW": "請完整填寫 SMTP 伺服器、連接埠與加密方式"
+  },
+  "外部发件必须使用 SSL/TLS 或 STARTTLS": {
+    "en": "External sending requires SSL/TLS or STARTTLS",
+    "zh-TW": "外部寄件必須使用 SSL/TLS 或 STARTTLS"
+  },
+  "无法确定发件地址，请将 SMTP 用户名或 IMAP 用户名设为邮箱地址": {
+    "en": "Cannot determine the sender address. Set the SMTP or IMAP username to an email address",
+    "zh-TW": "無法確定寄件地址，請將 SMTP 使用者名稱或 IMAP 使用者名稱設為郵件地址"
+  },
+  "该外部邮箱当前不能发件，请检查发件设置与授权状态": {
+    "en": "This external mailbox cannot send right now. Check its send settings and authorization",
+    "zh-TW": "該外部郵箱目前無法寄件，請檢查寄件設定與授權狀態"
+  },
+  "外部邮箱账号已删除": {
+    "en": "The external mailbox account was removed",
+    "zh-TW": "外部郵箱帳號已刪除"
+  },
+  "邮箱服务商已禁用 SMTP 认证，Microsoft 365 需由管理员启用 SMTP AUTH": {
+    "en": "The provider has disabled SMTP authentication. For Microsoft 365, an administrator must enable SMTP AUTH",
+    "zh-TW": "郵箱服務商已停用 SMTP 驗證，Microsoft 365 需由管理員啟用 SMTP AUTH"
+  },
+  "外部邮箱 SMTP 认证失败，请检查用户名、密码或授权码": {
+    "en": "External SMTP authentication failed. Check the username, password or authorization code",
+    "zh-TW": "外部郵箱 SMTP 驗證失敗，請檢查使用者名稱、密碼或授權碼"
+  },
+  "外部邮箱服务器拒绝了这封邮件": {
+    "en": "The external mail server rejected this message",
+    "zh-TW": "外部郵件伺服器拒絕了這封郵件"
+  },
+  "外部邮箱服务器暂时不可用，将自动重试": {
+    "en": "The external mail server is temporarily unavailable. It will retry automatically",
+    "zh-TW": "外部郵件伺服器暫時無法使用，將自動重試"
+  },
+  "发送结果未确认": { "en": "Delivery result not confirmed", "zh-TW": "傳送結果未確認" },
+  "外部邮箱账号已不可用": {
+    "en": "The external mailbox account is unavailable",
+    "zh-TW": "外部郵箱帳號已無法使用"
+  },
+  "邮箱服务商": { "en": "Mail provider", "zh-TW": "郵箱服務商" },
+  "其他邮箱（手动填写）": { "en": "Other (enter manually)", "zh-TW": "其他郵箱（手動填寫）" },
+  "推荐使用“Gmail OAuth”授权；如需密码方式，请先为 Google 账号开启两步验证，再生成应用专用密码。": {
+    "en": "Use “Gmail OAuth” where possible. For password sign-in, turn on 2-Step Verification for the Google account and create an app password.",
+    "zh-TW": "建議使用「Gmail OAuth」授權；如需密碼方式，請先為 Google 帳號開啟兩步驟驗證，再產生應用程式密碼。"
+  },
+  "Microsoft 365 / Outlook 已停用密码登录，请关闭此窗口并使用“Microsoft 365 / Outlook OAuth”授权。": {
+    "en": "Microsoft 365 / Outlook no longer allows password sign-in. Close this window and use “Microsoft 365 / Outlook OAuth”.",
+    "zh-TW": "Microsoft 365 / Outlook 已停用密碼登入，請關閉此視窗並使用「Microsoft 365 / Outlook OAuth」授權。"
+  },
+  "请在 Yahoo 账号安全设置中生成应用专用密码，密码栏填写该密码。": {
+    "en": "Create an app password in your Yahoo account security settings and enter it as the password.",
+    "zh-TW": "請在 Yahoo 帳號安全性設定中產生應用程式密碼，密碼欄填寫該密碼。"
+  },
+  "请在 Apple 账户中生成 App 专用密码，用户名填写完整的 iCloud 邮箱地址。": {
+    "en": "Create an app-specific password in your Apple Account and use your full iCloud email address as the username.",
+    "zh-TW": "請在 Apple 帳號中產生 App 專用密碼，使用者名稱填寫完整的 iCloud 郵件地址。"
+  },
+  "请在 QQ 邮箱设置中开启 IMAP/SMTP 服务并生成授权码，密码栏填写授权码。": {
+    "en": "Turn on IMAP/SMTP in QQ Mail settings, generate an authorization code and enter it as the password.",
+    "zh-TW": "請在 QQ 郵箱設定中開啟 IMAP/SMTP 服務並產生授權碼，密碼欄填寫授權碼。"
+  },
+  "请在网易邮箱设置中开启 IMAP/SMTP 服务并获取授权码，密码栏填写授权码。": {
+    "en": "Turn on IMAP/SMTP in NetEase Mail settings, get an authorization code and enter it as the password.",
+    "zh-TW": "請在網易郵箱設定中開啟 IMAP/SMTP 服務並取得授權碼，密碼欄填寫授權碼。"
+  },
+  "作用域：https://mail.google.com/；发布状态不要使用“测试”，否则授权 7 天后失效": {
+    "en": "Scope: https://mail.google.com/. Do not leave the publishing status as “Testing”, or authorizations expire after 7 days",
+    "zh-TW": "作用域：https://mail.google.com/；發布狀態不要使用「測試」，否則授權 7 天後失效"
+  },
+  "权限：IMAP.AccessAsUser.All、SMTP.Send、offline_access；已接入的账号需重新授权后才能发件": {
+    "en": "Permissions: IMAP.AccessAsUser.All, SMTP.Send, offline_access. Existing accounts must be reauthorized before they can send",
+    "zh-TW": "權限：IMAP.AccessAsUser.All、SMTP.Send、offline_access；已接入的帳號需重新授權後才能寄件"
+  },
+  "不支持的邮箱服务商": { "en": "Unsupported mail provider", "zh-TW": "不支援的郵箱服務商" }
 }

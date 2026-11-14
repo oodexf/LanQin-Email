@@ -23,7 +23,7 @@ const literalExemptions = new Set([
   "TTL:", "s", "mail.example.com", "https://mail.example.com", "127.0.0.1",
   "test@example.com", "user@example.com", "example.com", "alice", "Alice",
   "alice@example.com", "cc@example.com", "bcc@example.com", "your-name",
-  "name@example.com", "imap.example.com", "billing-system",
+  "name@example.com", "imap.example.com", "smtp.example.com", "billing-system",
 ])
 const attributes = new Set(["title", "placeholder", "aria-label", "label", "text", "closeLabel"])
 const messageProperties = new Set(["title", "description", "label", "text", "confirmText", "cancelText"])
