@@ -74,6 +74,17 @@ var externalSchemaTables = []string{
 // Existing unversioned databases are intentionally rejected: importing SQLite
 // data requires an explicit data migration and must never happen at startup.
 func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("external schema: reserve connection: %w", err)
+	}
+	defer conn.Close()
+	return initializeExternalSchemaOnConn(ctx, conn, driver, false)
+}
+
+// A native restore holds this same connection's schema lock until row import
+// commits, and requires an empty database rather than migrating existing data.
+func initializeExternalSchemaOnConn(ctx context.Context, conn *sql.Conn, driver string, requireEmpty bool) error {
 	driver = strings.ToLower(strings.TrimSpace(driver))
 	var statements []string
 	var migrationName string
@@ -88,12 +99,6 @@ func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) er
 		return fmt.Errorf("external schema: unsupported database driver %q", driver)
 	}
 
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("external schema: reserve connection: %w", err)
-	}
-	defer conn.Close()
-
 	unlock, err := lockExternalSchema(ctx, conn, driver)
 	if err != nil {
 		return err
@@ -103,6 +108,9 @@ func initializeExternalSchema(ctx context.Context, db *sql.DB, driver string) er
 	tables, err := listExternalSchemaTables(ctx, conn, driver)
 	if err != nil {
 		return err
+	}
+	if requireEmpty && len(tables) != 0 {
+		return errNativeDatabaseBackup
 	}
 	if len(tables) != 0 {
 		if err := migrateExternalSchemaV2(ctx, conn, driver, tables, migrationName); err != nil {
@@ -299,7 +307,7 @@ func listExternalSchemaTables(ctx context.Context, conn *sql.Conn, driver string
 	return tables, nil
 }
 
-func validateExternalSchema(ctx context.Context, conn *sql.Conn, actual []string, migrationName string) error {
+func validateExternalSchema(ctx context.Context, conn dbQueryer, actual []string, migrationName string) error {
 	expected := append([]string(nil), externalSchemaTables...)
 	sort.Strings(expected)
 	actual = append([]string(nil), actual...)
