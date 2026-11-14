@@ -182,6 +182,16 @@ func TestNativeDatabaseBackupRestoreContract(t *testing.T) {
 			if err := db.QueryRowContext(t.Context(), "SELECT subject FROM messages WHERE id=?", draft.ID).Scan(&subject); err != nil || subject != "Native 合成 draft" {
 				t.Fatal("native draft text changed", subject, err)
 			}
+			var queueSubject string
+			var copyAttempts int
+			if err := db.QueryRowContext(t.Context(), "SELECT subject,sent_copy_attempt_count FROM send_queue WHERE id='native-send'").Scan(&queueSubject, &copyAttempts); err != nil || queueSubject != "Native synthetic send" || copyAttempts != 0 {
+				t.Fatal("native V13 queue metadata changed", err)
+			}
+			var oauthPayload string
+			if err := db.QueryRowContext(t.Context(), "SELECT payload_ciphertext FROM external_mail_oauth_states WHERE token_hash='native-oauth-state'").Scan(&oauthPayload); err != nil || oauthPayload != "synthetic-encrypted-payload" {
+				t.Fatal("native OAuth state table not preserved", err)
+			}
+
 			if err := checkNativeRestoreActivation(t.Context(), db, driver); err == nil {
 				t.Fatal("raw imported DB could start business workers")
 			}
@@ -340,10 +350,11 @@ func seedNativeInstallationWork(t *testing.T, a *App, mailboxID, draftID string)
 		sql  string
 		args []any
 	}{
-		{"INSERT INTO send_queue(id,user_id,mailbox_id,source,mail_from,header_from,recipients_json,mime_base64,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", []any{"native-send", userID, mailboxID, "native_test", a.cfg.AdminEmail, a.cfg.AdminEmail, `["recipient@native.test"]`, "c3ludGhldGljLXBheWxvYWQ=", now, now, now}},
+		{"INSERT INTO send_queue(id,user_id,mailbox_id,source,mail_from,header_from,recipients_json,mime_base64,next_attempt_at,created_at,updated_at,subject) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", []any{"native-send", userID, mailboxID, "native_test", a.cfg.AdminEmail, a.cfg.AdminEmail, `["recipient@native.test"]`, "c3ludGhldGljLXBheWxvYWQ=", now, now, now, "Native synthetic send"}},
 		{"INSERT INTO scheduled_sends(id,user_id,mailbox_id,draft_id,payload_json,send_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", []any{"native-schedule", userID, mailboxID, draftID, `{"synthetic":"preserve-me"}`, now, now, now}},
 		{"INSERT INTO api_tokens(id,user_id,name,token_hash,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", []any{"native-token", userID, "synthetic token", "synthetic-token-hash", now, now, now}},
 		{"INSERT INTO external_imap_accounts(id,user_id,mailbox_id,name,host,port,tls_mode,username,password_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", []any{"native-external", userID, mailboxID, "synthetic account", "imap.example.invalid", 993, "tls", a.cfg.AdminEmail, "synthetic-not-a-real-ciphertext", now, now}},
+		{"INSERT INTO external_mail_oauth_states(token_hash,user_id,binding_hash,provider,account_id,mailbox_id,payload_ciphertext,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)", []any{"native-oauth-state", userID, "synthetic-binding-hash", "gmail", "native-external", mailboxID, "synthetic-encrypted-payload", now, now}},
 		{"INSERT INTO status_webhook_outbox(id,event_key,event_type,mailbox_id,payload_json,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", []any{"native-notification", "native-event-key", "synthetic", mailboxID, `{"synthetic":"preserve-notification"}`, now, now, now}},
 	} {
 		if _, err := a.db.ExecContext(t.Context(), query.sql, query.args...); err != nil {

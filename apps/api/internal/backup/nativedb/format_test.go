@@ -10,7 +10,7 @@ import (
 )
 
 func headerFixture() Header {
-	return Header{Version: 1, Driver: "mysql", Family: "mysql:8.4", SchemaVersion: 12, Tables: []Table{{Name: "messages", Columns: []Column{{Name: "body", Type: "text"}, {Name: "id", Type: "bigint"}, {Name: "optional", Type: "text", Nullable: true}}}}}
+	return Header{Version: 1, Driver: "mysql", Family: "mysql:8.4", SchemaVersion: 13, Tables: []Table{{Name: "messages", Columns: []Column{{Name: "body", Type: "text"}, {Name: "id", Type: "bigint"}, {Name: "optional", Type: "text", Nullable: true}}}}}
 }
 
 func validFixture(t *testing.T) []byte {

@@ -20,10 +20,13 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 	"lanqin-email-api/internal/backup/storage"
 )
 
 type App struct {
+	externalSMTPDialForTest        externalSMTPDialFunc
 	collectionMu                   sync.Mutex
 	cfg                            Config
 	db                             *sql.DB
@@ -41,6 +44,9 @@ type App struct {
 	syncEventClients               map[chan struct{}]string
 	sseConnections                 map[string]int
 	externalIMAP                   externalIMAPClientFactory
+	externalIMAPOAuthConfigForTest func(string) (*oauth2.Config, externalIMAPOAuthProvider, error)
+	externalIMAPOAuthRefresh       singleflight.Group
+	externalSMTPRootCAsForTest     *x509.CertPool
 	linuxDoOAuth                   linuxDoOAuthClient
 	telegramAPIBaseURL             string
 	messageSearchFTS               bool
@@ -554,6 +560,11 @@ func (a *App) migrate(ctx context.Context) error {
 			mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
 			sent_message_id TEXT NOT NULL DEFAULT '',
 			message_id TEXT NOT NULL DEFAULT '',
+			route TEXT NOT NULL DEFAULT 'relay',
+			external_account_id TEXT,
+			sent_copy_status TEXT NOT NULL DEFAULT 'none',
+			sent_copy_attempt_count INTEGER NOT NULL DEFAULT 0,
+			subject TEXT NOT NULL DEFAULT '',
 			source TEXT NOT NULL,
 			mail_from TEXT NOT NULL,
 			header_from TEXT NOT NULL,
@@ -696,6 +707,17 @@ func (a *App) migrate(ctx context.Context) error {
 			oauth_access_token_ciphertext TEXT NOT NULL DEFAULT '',
 			oauth_refresh_token_ciphertext TEXT NOT NULL DEFAULT '',
 			oauth_expiry TEXT,
+			provider_preset TEXT NOT NULL DEFAULT 'custom',
+			auth_status TEXT NOT NULL DEFAULT 'ok',
+			oauth_subject TEXT NOT NULL DEFAULT '',
+			oauth_generation INTEGER NOT NULL DEFAULT 0,
+			smtp_host TEXT NOT NULL DEFAULT '',
+			smtp_port INTEGER NOT NULL DEFAULT 0,
+			smtp_tls_mode TEXT NOT NULL DEFAULT '',
+			smtp_username TEXT NOT NULL DEFAULT '',
+			smtp_password_ciphertext TEXT NOT NULL DEFAULT '',
+			send_enabled INTEGER NOT NULL DEFAULT 0,
+			sent_copy_mode TEXT NOT NULL DEFAULT 'server',
 			storage_mode TEXT NOT NULL DEFAULT 'local' CHECK(storage_mode IN ('local','remote')),
 			sync_read_state INTEGER NOT NULL DEFAULT 1,
 			enabled INTEGER NOT NULL DEFAULT 1,
@@ -707,6 +729,19 @@ func (a *App) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_imap_accounts_user_mailbox ON external_imap_accounts(user_id, mailbox_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_imap_accounts_enabled ON external_imap_accounts(enabled, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS external_mail_oauth_states (
+			token_hash TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			binding_hash TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			account_id TEXT,
+			mailbox_id TEXT NOT NULL,
+			payload_ciphertext TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used_at TEXT,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_external_mail_oauth_states_expires ON external_mail_oauth_states(expires_at)`,
 		`CREATE TABLE IF NOT EXISTS external_imap_folder_states (
 			account_id TEXT NOT NULL REFERENCES external_imap_accounts(id) ON DELETE CASCADE,
 			remote_folder TEXT NOT NULL,

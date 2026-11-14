@@ -2,6 +2,7 @@ package app
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -12,7 +13,7 @@ import (
 func backupOAuthSafeLogger(next http.Handler) http.Handler {
 	ordinary := middleware.Logger(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/admin/backups/drive/oauth/callback" {
+		if r.URL.Path != "/api/admin/backups/drive/oauth/callback" && !(strings.HasPrefix(r.URL.Path, externalMailOAuthCookiePath+"/") && strings.HasSuffix(r.URL.Path, "/callback")) {
 			ordinary.ServeHTTP(w, r)
 			return
 		}

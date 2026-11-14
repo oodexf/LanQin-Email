@@ -73,3 +73,25 @@ func TestBackupOAuthLoggerRedactsRejectedUnauthenticatedCallback(t *testing.T) {
 		t.Fatal("rejected callback leaked code/state")
 	}
 }
+
+func TestExternalMailOAuthLoggerRedactsCallbackAndKeepsRedirectContract(t *testing.T) {
+	a := newTestApp(t)
+	stopTestWorkers(a)
+	var output bytes.Buffer
+	previous := middleware.DefaultLogger
+	middleware.DefaultLogger = middleware.RequestLogger(&middleware.DefaultLogFormatter{Logger: log.New(&output, "", 0), NoColor: true})
+	defer func() { middleware.DefaultLogger = previous }()
+	// Even when external IMAP is disabled, the callback returns a fixed redirect.
+	r := httptest.NewRequest("GET", "/api/external-imap-oauth/gmail/callback?code=synthetic-secret-code&state=synthetic-secret-state&error=synthetic-secret-error", nil)
+	w := httptest.NewRecorder()
+	a.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != a.cfg.PublicBaseURL+"/profile?tab=mailboxes&externalMail=invalid_state" {
+		t.Fatal("callback redirect contract lost", w.Code, w.Header().Get("Location"))
+	}
+	if strings.Contains(output.String(), "synthetic-secret") || strings.Contains(w.Body.String(), "synthetic-secret") {
+		t.Fatal("callback query entered access log/response")
+	}
+	if !strings.Contains(output.String(), "/api/external-imap-oauth/gmail/callback") {
+		t.Fatal("safe access log missing")
+	}
+}

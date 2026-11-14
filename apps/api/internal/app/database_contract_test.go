@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -90,6 +91,12 @@ func TestExternalDatabaseContract(t *testing.T) {
 					assertPostgresConcurrentMailboxQuota(t, a, false, false)
 				})
 			})
+			t.Run("external SMTP sends", func(t *testing.T) { assertExternalSMTPDatabaseContract(t, a) })
+			t.Run("external mail OAuth state cleanup", func(t *testing.T) {
+				f := newExternalMailOAuthFixtureForApp(t, a)
+				assertExternalMailOAuthStateCleanup(t, f)
+				assertExternalMailOAuthConcurrentStartsStayBounded(t, f)
+			})
 			fresh := externalSchemaFingerprint(t, a.db, tt.driver)
 			if err := a.Close(); err != nil {
 				t.Fatalf("close first app: %v", err)
@@ -115,7 +122,7 @@ func TestExternalDatabaseContract(t *testing.T) {
 			// Every released schema version must upgrade to exactly the fresh schema.
 			// V1 to V4 used to fail: their checks expected tables added later, and
 			// their migrations created columns that V6 and V9 then added again.
-			for _, from := range []int{1, 2, 3, 4, 7} {
+			for _, from := range []int{1, 2, 3, 4, 7, 12} {
 				t.Run(fmt.Sprintf("upgrade from V%d", from), func(t *testing.T) {
 					prepareExternalSchemaUpgrade(t, cfg, from)
 					assertExternalSchemaUpgradeMatches(t, cfg, filepath.Join(dataDir, fmt.Sprintf("upgrade-v%d", from)), fresh)
@@ -147,6 +154,35 @@ func TestExternalDatabaseContract(t *testing.T) {
 				}
 				_ = db.Close()
 				assertExternalSchemaUpgradeMatches(t, cfg, filepath.Join(dataDir, "resume-v9"), fresh)
+			})
+
+			t.Run("PR1 V13 upgrade", func(t *testing.T) {
+				prepareExternalSchemaUpgrade(t, cfg, 13)
+				assertExternalSchemaUpgradeMatches(t, cfg, filepath.Join(dataDir, "upgrade-v13"), fresh)
+			})
+
+			t.Run("resume interrupted MySQL V13 upgrade", func(t *testing.T) {
+				if tt.driver != databaseDriverMySQL {
+					t.Skip("PostgreSQL migrations are transactional")
+				}
+				prepareExternalSchemaUpgrade(t, cfg, 12)
+				db, err := openDatabase(t.Context(), cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				statements := externalSchemaV13Statements(tt.driver)
+				// Crash after all columns and the table, before its expires index.
+				for _, statement := range statements[:len(statements)-1] {
+					if strings.HasPrefix(strings.TrimSpace(statement), "CREATE TABLE ") {
+						statement = postgresTableToMySQL(statement)
+					}
+					if _, err := db.ExecContext(t.Context(), statement); err != nil {
+						db.Close()
+						t.Fatal(err)
+					}
+				}
+				db.Close()
+				assertExternalSchemaUpgradeMatches(t, cfg, filepath.Join(dataDir, "resume-v13"), fresh)
 			})
 
 			// Reopening validates upgrade idempotency and persisted seed data.
@@ -334,6 +370,7 @@ func assertExternalDatabaseContract(t *testing.T, a *App) {
 	assertOAuthIdentityContract(t, ctx, a)
 	assertRegistrationInviteContract(t, ctx, a, adminID)
 	assertDomainCollectionContract(t, a)
+	assertExternalMailV13Contract(t, a)
 
 	var migrationCount int
 	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=?`, externalSchemaVersion).Scan(&migrationCount); err != nil {
@@ -465,6 +502,7 @@ func prepareExternalSchemaUpgrade(t *testing.T, cfg Config, from int) {
 		version    int
 		statements []string
 	}{
+		{13, []string{"ALTER TABLE send_queue DROP COLUMN sent_copy_attempt_count", "ALTER TABLE send_queue DROP COLUMN subject", "DROP TABLE external_mail_oauth_states", "ALTER TABLE external_imap_accounts DROP COLUMN provider_preset", "ALTER TABLE external_imap_accounts DROP COLUMN auth_status", "ALTER TABLE external_imap_accounts DROP COLUMN oauth_subject", "ALTER TABLE external_imap_accounts DROP COLUMN oauth_generation", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_host", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_port", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_tls_mode", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_username", "ALTER TABLE external_imap_accounts DROP COLUMN smtp_password_ciphertext", "ALTER TABLE external_imap_accounts DROP COLUMN send_enabled", "ALTER TABLE external_imap_accounts DROP COLUMN sent_copy_mode", "ALTER TABLE send_queue DROP COLUMN route", "ALTER TABLE send_queue DROP COLUMN external_account_id", "ALTER TABLE send_queue DROP COLUMN sent_copy_status"}},
 		{12, []string{"DROP TABLE mailbox_push_requests", "DROP TABLE domain_collections", "DROP TABLE domain_collection_audit", "DROP TABLE local_delivery_jobs"}},
 		{11, []string{"ALTER TABLE smtp_send_events DROP COLUMN recipients"}},
 		{10, []string{"DROP INDEX idx_sessions_user" + indexSuffix, "DROP INDEX idx_sessions_expires" + indexSuffix, "ALTER TABLE users DROP COLUMN two_factor_last_counter"}},
@@ -812,4 +850,202 @@ func assertMailboxCountQuotaContract(t *testing.T, a *App) {
 	if user.MailboxCount != 1 || user.MailboxesCreatedTotal != 52 {
 		t.Fatalf("current=%d total=%d, want 1/52", user.MailboxCount, user.MailboxesCreatedTotal)
 	}
+}
+
+func TestSQLiteExternalMailV13Contract(t *testing.T) {
+	a := newTestApp(t)
+	stopTestWorkers(a)
+	assertExternalMailV13Contract(t, a)
+}
+
+func assertExternalMailV13Contract(t *testing.T, a *App) {
+	t.Helper()
+	ctx := t.Context()
+	mb, err := a.mailboxByAddress(ctx, a.cfg.AdminEmail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, now := newID("ximap"), a.now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO external_imap_accounts(id,user_id,mailbox_id,name,host,port,tls_mode,username,password_ciphertext,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, mb.UserID, mb.ID, "V13 synthetic", "imap.example.test", 993, "tls", "person@example.test", "synthetic", now, now); err != nil {
+		t.Fatal(err)
+	}
+	account, err := a.externalIMAPAccountForUser(ctx, mb.UserID, id)
+	if err != nil || account.AuthStatus != "ok" || account.ProviderPreset != "custom" || account.OAuthSubject != "" || account.OAuthGeneration != 0 {
+		t.Fatal("V13 account defaults", err)
+	}
+	var smtpHost, smtpTLS, smtpUser, smtpCipher, sentMode string
+	var smtpPort, sendEnabled int
+	if err := a.db.QueryRowContext(ctx, `SELECT smtp_host,smtp_port,smtp_tls_mode,smtp_username,smtp_password_ciphertext,send_enabled,sent_copy_mode FROM external_imap_accounts WHERE id=?`, id).Scan(&smtpHost, &smtpPort, &smtpTLS, &smtpUser, &smtpCipher, &sendEnabled, &sentMode); err != nil || smtpHost != "" || smtpPort != 0 || smtpTLS != "" || smtpUser != "" || smtpCipher != "" || sendEnabled != 0 || sentMode != "server" {
+		t.Fatal("V13 reserved SMTP defaults", err)
+	}
+	queueID := newID("snd")
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO send_queue(id,user_id,mailbox_id,source,mail_from,header_from,recipients_json,mime_base64,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, queueID, mb.UserID, mb.ID, "contract", mb.Address, mb.Address, "[]", "", now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	var route, sentStatus, queueSubject string
+	var copyAttempts int
+	var externalID sql.NullString
+	if err := a.db.QueryRowContext(ctx, `SELECT route,external_account_id,sent_copy_status,subject,sent_copy_attempt_count FROM send_queue WHERE id=?`, queueID).Scan(&route, &externalID, &sentStatus, &queueSubject, &copyAttempts); err != nil || route != "relay" || externalID.Valid || sentStatus != "none" || queueSubject != "" || copyAttempts != 0 {
+		t.Fatal("V13 route defaults", err)
+	}
+	if _, err := a.db.ExecContext(ctx, `UPDATE send_queue SET route='external',external_account_id=? WHERE id=?`, id, queueID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM external_imap_accounts WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.QueryRowContext(ctx, `SELECT external_account_id FROM send_queue WHERE id=?`, queueID).Scan(&externalID); err != nil || !externalID.Valid || externalID.String != id {
+		t.Fatal("deleted account erased queue route identity", err)
+	}
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM send_queue WHERE id=?`, queueID); err != nil {
+		t.Fatal(err)
+	}
+	// Check state PK, one-time consumption and owner cascade using a dedicated user.
+	userID, stateHash := newID("usr"), hashToken(randomToken())
+	if _, err := a.db.ExecContext(ctx, `INSERT INTO users(id,email,display_name,role,password_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, userID, userID+"@example.test", "Synthetic", "user", "unused", now, now); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO external_mail_oauth_states(token_hash,user_id,binding_hash,provider,account_id,mailbox_id,payload_ciphertext,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?,?)`
+	args := []any{stateHash, userID, "synthetic-binding-hash", "gmail", nil, "synthetic-mailbox", "synthetic-ciphertext", a.now().Add(time.Minute).UTC().Format(time.RFC3339Nano), now}
+	if _, err := a.db.ExecContext(ctx, insert, args...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.ExecContext(ctx, insert, args...); !isUniqueViolation(err) {
+		t.Fatal("state PK not enforced", err)
+	}
+	for _, want := range []int64{1, 0} {
+		result, err := a.db.ExecContext(ctx, `UPDATE external_mail_oauth_states SET used_at=? WHERE token_hash=? AND used_at IS NULL AND expires_at>?`, now, stateHash, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, err := result.RowsAffected(); err != nil || n != want {
+			t.Fatal("non-atomic state consumption", n, err)
+		}
+	}
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_mail_oauth_states WHERE token_hash=?`, stateHash).Scan(&count); err != nil || count != 0 {
+		t.Fatal("state owner cascade", err)
+	}
+}
+
+func TestSQLiteExternalSMTPContract(t *testing.T) {
+	assertExternalSMTPDatabaseContract(t, newTestApp(t))
+}
+
+// Exercise PR2 statements against each real dialect, including routed claims,
+// sent-copy leases/counters, the admin UNION, resolve CAS and account deletion.
+func assertExternalSMTPDatabaseContract(t *testing.T, a *App) {
+	t.Helper()
+	f := newExternalSMTPFixtureForApp(t, a)
+	backend := &externalSMTPTestServer{}
+	host, port := startExternalSMTPTestServer(t, a, backend, "tls")
+	account := f.create(t, host, port, "tls", "append")
+	client := &externalSentCopyTestClient{folders: []externalIMAPRemoteFolder{{Name: "Sent"}}}
+	previousFactory := a.externalIMAP
+	a.externalIMAP = externalSentCopyTestFactory{client}
+	defer func() { a.externalIMAP = previousFactory }()
+	id := f.enqueue(t)
+	if err := a.processDueSendQueue(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	status, _, copyStatus, _, _ := f.state(t, id)
+	if status != "delivered" || copyStatus != "done" || client.appends != 1 || backend.deliveries.Load() != 1 {
+		t.Fatalf("contract SMTP=%s copy=%s appends=%d", status, copyStatus, client.appends)
+	}
+	assertExternalQueueMIME(t, f, id, false)
+	for _, action := range []string{"delivered", "retry"} {
+		queueID := f.enqueue(t)
+		if _, err := a.db.Exec(`UPDATE send_queue SET status='unconfirmed' WHERE id=?`, queueID); err != nil {
+			t.Fatal(err)
+		}
+		if res := f.request(t, "GET", "/admin?queueType=send&status=unconfirmed", nil, nil); res.Code != 200 || !strings.Contains(res.Body.String(), `"route":"external"`) {
+			t.Fatalf("admin contract %d %s", res.Code, res.Body.String())
+		}
+		if res := f.request(t, "POST", "/accounts/"+account.ID+"/sends/"+queueID+"/resolve", map[string]any{"action": action}, nil); res.Code != 200 {
+			t.Fatalf("resolve %d %s", res.Code, res.Body.String())
+		}
+	}
+	if res := f.request(t, "GET", "/accounts/"+account.ID+"/sends?limit=20", nil, nil); res.Code != 200 {
+		t.Fatalf("records %d %s", res.Code, res.Body.String())
+	}
+	// Claim and expire an external lease to verify conservative crash recovery.
+	staleID := f.enqueue(t)
+	if _, err := a.claimSendQueueItem(t.Context(), staleID); err != nil {
+		t.Fatal(err)
+	}
+	old := a.now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	if _, err := a.db.Exec(`UPDATE send_queue SET lease_until=?,updated_at=? WHERE id=?`, old, old, staleID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.recoverStaleSendQueueItems(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _, _, _ = f.state(t, staleID)
+	if status != "unconfirmed" {
+		t.Fatal("stale external send retried")
+	}
+	// Execute the scheduled payload and creator-authorization queries on this dialect.
+	scheduled := f.request(t, "POST", "/schedule", map[string]any{"externalAccountId": account.ID, "mailboxId": f.mb.ID, "to": []string{"recipient@example.test"}, "sendAt": a.now().UTC().Add(time.Hour).Format(time.RFC3339Nano)}, nil)
+	if scheduled.Code != 201 {
+		t.Fatalf("schedule contract %d %s", scheduled.Code, scheduled.Body.String())
+	}
+	var scheduledItem ScheduledSend
+	if err := json.Unmarshal(scheduled.Body.Bytes(), &scheduledItem); err != nil {
+		t.Fatal(err)
+	}
+	var payload string
+	if err := a.db.QueryRow(`SELECT payload_json FROM scheduled_sends WHERE id=?`, scheduledItem.ID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE external_imap_accounts SET enabled=0 WHERE id=?`, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	a.processScheduledSend(t.Context(), scheduledItem.ID, f.mb.ID, "", payload)
+	var scheduledStatus string
+	if err := a.db.QueryRow(`SELECT status FROM scheduled_sends WHERE id=?`, scheduledItem.ID).Scan(&scheduledStatus); err != nil || scheduledStatus != "failed" {
+		t.Fatal("scheduled sender was not rechecked", err)
+	}
+	if _, err := a.db.Exec(`UPDATE external_imap_accounts SET enabled=1 WHERE id=?`, account.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	queued := f.enqueue(t)
+	if res := f.request(t, "DELETE", "/accounts/"+account.ID, nil, nil); res.Code != 200 {
+		t.Fatalf("delete %d %s", res.Code, res.Body.String())
+	}
+	status, code, _, attempt, max := f.state(t, queued)
+	if status != "failed" || code != "external account removed" || attempt != max {
+		t.Fatalf("deleted account %s %s", status, code)
+	}
+	if res := f.request(t, "POST", "/admin/send/"+queued+"/retry", nil, nil); res.Code != 409 {
+		t.Fatalf("retry %d %s", res.Code, res.Body.String())
+	}
+	if err := a.processDueSendQueue(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	status, code, _, attempt, max = f.state(t, queued)
+	if status != "failed" || code != "external account removed" || attempt != max {
+		t.Fatalf("missing account route %s %s", status, code)
+	}
+	oauth := newExternalMailOAuthFixtureForApp(t, a)
+	for _, provider := range []string{"gmail", "outlook"} {
+		connected := connectExternalSMTPProvider(t, oauth, provider)
+		defer a.db.Exec(`DELETE FROM external_imap_accounts WHERE id=?`, connected.ID)
+		endpoint, port, mode := externalOAuthSMTPEndpoint(provider)
+		if connected.SMTPHost != endpoint || connected.SMTPPort != port || connected.SMTPTLSMode != mode {
+			t.Fatal("OAuth SMTP defaults missing")
+		}
+		if provider == "gmail" {
+			state, cookie := oauth.start(t, map[string]any{"accountId": connected.ID})
+			oauth.callback(t, state, cookie, "", "reauthorized")
+			reauthorized, err := a.externalIMAPAccountForUser(t.Context(), oauth.user.ID, connected.ID)
+			if err != nil || reauthorized.SMTPHost != endpoint || reauthorized.OAuthGeneration != connected.OAuthGeneration+1 {
+				t.Fatal("OAuth reauthorization SMTP contract", err)
+			}
+		}
+	}
+
 }

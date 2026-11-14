@@ -192,7 +192,7 @@ func prepareNativeDatabaseInstallation(ctx context.Context, cfg Config, snapshot
 		return nil, err
 	}
 	if !prepared {
-		plan.SendQueue, err = pauseNativeWork(ctx, tx, "send_queue", []string{"queued", "sending", "failed", "pending"}, []string{"delivered", "canceled"}, "canceled", limits.MaxEntries)
+		plan.SendQueue, err = pauseNativeWork(ctx, tx, "send_queue", []string{"queued", "sending", "failed", "pending"}, []string{"delivered", "canceled", "unconfirmed"}, "canceled", limits.MaxEntries)
 		if err != nil {
 			return nil, err
 		}
@@ -223,6 +223,11 @@ func prepareNativeDatabaseInstallation(ctx context.Context, cfg Config, snapshot
 			if _, err := tx.ExecContext(ctx, change.statement); err != nil {
 				return nil, errNativeDatabaseBackup
 			}
+		}
+		// A restored browser-bound consent must not create or re-enable an
+		// external account after restoration has suspended external workers.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM external_mail_oauth_states"); err != nil {
+			return nil, errNativeDatabaseBackup
 		}
 	}
 	if validateNativeForeignKeys(ctx, tx, cfg.DBDriver, keys) != nil {
@@ -397,7 +402,11 @@ func pauseNativeWork(ctx context.Context, tx *sql.Tx, table string, active, term
 		return nil, errNativeDatabaseBackup
 	}
 	for state := range counts {
-		if _, err := tx.ExecContext(ctx, "UPDATE "+table+" SET status=? WHERE status=?", paused, state); err != nil {
+		setClause := "status=?"
+		if table == "send_queue" {
+			setClause += ",mime_base64=CASE WHEN route='external' AND sent_copy_status<>'pending' THEN '' ELSE mime_base64 END"
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE "+table+" SET "+setClause+" WHERE status=?", paused, state); err != nil {
 			return nil, errNativeDatabaseBackup
 		}
 	}
@@ -406,8 +415,8 @@ func pauseNativeWork(ctx context.Context, tx *sql.Tx, table string, active, term
 
 func checkNativePreparedWork(ctx context.Context, db backupSnapshotQuery) error {
 	for _, query := range []string{
-		"SELECT COUNT(*) FROM sessions", "SELECT COUNT(*) FROM login_challenges", "SELECT COUNT(*) FROM api_tokens WHERE disabled<>1", "SELECT COUNT(*) FROM external_imap_accounts WHERE enabled<>0",
-		"SELECT COUNT(*) FROM send_queue WHERE status NOT IN ('delivered','canceled')", "SELECT COUNT(*) FROM scheduled_sends WHERE status NOT IN ('sent','failed','cancelled')", "SELECT COUNT(*) FROM local_delivery_jobs WHERE status NOT IN ('delivered','failed','restore_paused')",
+		"SELECT COUNT(*) FROM sessions", "SELECT COUNT(*) FROM login_challenges", "SELECT COUNT(*) FROM external_mail_oauth_states", "SELECT COUNT(*) FROM api_tokens WHERE disabled<>1", "SELECT COUNT(*) FROM external_imap_accounts WHERE enabled<>0",
+		"SELECT COUNT(*) FROM send_queue WHERE status NOT IN ('delivered','canceled','unconfirmed')", "SELECT COUNT(*) FROM scheduled_sends WHERE status NOT IN ('sent','failed','cancelled')", "SELECT COUNT(*) FROM local_delivery_jobs WHERE status NOT IN ('delivered','failed','restore_paused')",
 		"SELECT COUNT(*) FROM status_webhook_outbox WHERE delivered_at IS NULL AND next_attempt_at<>'9999-12-31T23:59:59Z'", "SELECT COUNT(*) FROM telegram_notification_outbox WHERE delivered_at IS NULL AND next_attempt_at<>'9999-12-31T23:59:59Z'",
 	} {
 		var count int

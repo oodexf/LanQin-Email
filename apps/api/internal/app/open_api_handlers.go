@@ -448,6 +448,11 @@ func (a *App) handleOpenAPISendMail(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
+	if strings.TrimSpace(req.ExternalAccountID) != "" {
+		badRequest(w, errors.New("externalAccountId is only supported by webmail"))
+		return
+	}
+
 	mb, err := a.mailboxForCurrentUserWithID(r, req.MailboxID)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "mailbox not found")

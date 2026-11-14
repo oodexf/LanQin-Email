@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -99,3 +100,55 @@ func TestExternalIMAPSyncFolderUsesBatchBodiesAndRetriesFailedUID(t *testing.T) 
 		t.Fatalf("last UID checkpoint=%d, want successful UID 1", lastUID)
 	}
 }
+
+func TestExternalIMAPUIDValidityResetCleansLocalMessagesAndReimports(t *testing.T) {
+	f := newExternalMailOAuthFixture(t)
+	account := f.connect(t)
+	f.a.cfg.MaildirRoot = t.TempDir()
+	raw := []byte("From: sender@example.test\r\nTo: person@example.test\r\nSubject: synthetic old attachment\r\nMessage-ID: <old-validity@example.test>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=synthetic\r\n\r\n--synthetic\r\nContent-Type: text/plain\r\n\r\nbody\r\n--synthetic\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=synthetic.txt\r\n\r\nsynthetic attachment\r\n--synthetic--\r\n")
+	client := &externalIMAPSyncTestClient{items: []externalIMAPRemoteMessage{{UID: 100, UIDValidity: 7, Folder: "INBOX", Raw: raw}}}
+	if n, _, failed, err := f.a.syncExternalIMAPFolder(t.Context(), account, client, externalIMAPRemoteFolder{Name: "INBOX", UIDValidity: 7}); err != nil || n != 1 || failed != 0 {
+		t.Fatalf("initial import = %d %d %v", n, failed, err)
+	}
+	var oldID, rawPath, attachmentPath string
+	if err := f.a.db.QueryRow(`SELECT m.id,m.raw_path,a.storage_path FROM messages m JOIN attachments a ON a.message_id=m.id JOIN external_imap_messages em ON em.local_message_id=m.id WHERE em.account_id=?`, account.ID).Scan(&oldID, &rawPath, &attachmentPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{rawPath, attachmentPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("imported file missing: %v", err)
+		}
+	}
+	// An unrelated folder mapping must survive the reset.
+	now := f.a.now().UTC().Format(time.RFC3339Nano)
+	if _, err := f.a.db.Exec(`INSERT INTO external_imap_messages(account_id,remote_folder,uid_validity,uid,created_at,updated_at) VALUES(?,?,?,?,?,?)`, account.ID, "Archive", 7, 100, now, now); err != nil {
+		t.Fatal(err)
+	}
+	client.items = []externalIMAPRemoteMessage{{UID: 1, UIDValidity: 8, Folder: "INBOX", Raw: []byte("From: sender@example.test\r\nTo: person@example.test\r\nSubject: synthetic new generation\r\nMessage-ID: <new-validity@example.test>\r\n\r\nnew body")}}
+	if n, skipped, failed, err := f.a.syncExternalIMAPFolder(t.Context(), account, client, externalIMAPRemoteFolder{Name: "INBOX", UIDValidity: 8}); err != nil || n != 1 || skipped != 0 || failed != 0 {
+		t.Fatalf("reset import = %d %d %d %v", n, skipped, failed, err)
+	}
+	for _, query := range []string{`SELECT COUNT(*) FROM messages WHERE id=?`, `SELECT COUNT(*) FROM attachments WHERE message_id=?`} {
+		var count int
+		if err := f.a.db.QueryRow(query, oldID).Scan(&count); err != nil || count != 0 {
+			t.Fatal("old local message/attachment row survived", err)
+		}
+	}
+	for _, path := range []string{rawPath, attachmentPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("old Maildir/attachment file survived: %v", err)
+		}
+	}
+	if f.a.externalIMAPRemoteMessageExists(t.Context(), account.ID, "INBOX", 7, 100) || !f.a.externalIMAPRemoteMessageExists(t.Context(), account.ID, "INBOX", 8, 1) || !f.a.externalIMAPRemoteMessageExists(t.Context(), account.ID, "Archive", 7, 100) {
+		t.Fatal("incorrect reset mapping scope")
+	}
+	state := f.a.loadExternalIMAPFolderState(t.Context(), account.ID, "INBOX")
+	if state.UIDValidity != 8 || state.LastUID != 1 {
+		t.Fatalf("checkpoint = %+v", state)
+	}
+	if n, _, _, err := f.a.syncExternalIMAPFolder(t.Context(), account, client, externalIMAPRemoteFolder{Name: "INBOX", UIDValidity: 8}); err != nil || n != 0 {
+		t.Fatal("same validity reimported mail", err)
+	}
+}
+
+func (c *externalIMAPSyncTestClient) Append(context.Context, string, []byte) error { return nil }
