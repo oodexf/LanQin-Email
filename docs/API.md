@@ -818,3 +818,96 @@ Retry and cancellation require `admin.settings.update`: `POST /api/admin/deliver
 ## 域名统一收件
 
 新增 /domains/{id}/collection 读写、/domain-collection-targets 候选邮箱和 /local-delivery-jobs 本地投递诊断接口。仅管理员加域名权限及相应 domains:read / domains:write scope 可调用。目标允许站内跨域，固定保留原件；目标生命周期变更受 409 引用保护。请求、响应、生产投递语义和迁移步骤见 [统一收件说明](DOMAIN_COLLECTION.md)。
+
+## External Mailbox OAuth / 第三方邮箱 OAuth（PR1）
+
+以下为浏览器会话接口（需要邮箱访问权限并开启外部 IMAP），不使用 `/api/open/v1` 的 API Token。账户只能由所属用户管理，不通过共享邮箱授权。PR1 仅接入收件和重新授权，SMTP/发件路由列仅预留。
+
+| Endpoint | Semantics / 语义 |
+|------|---------|
+| `GET /api/me/external-imap-accounts?mailboxId=...` | 返回 `{items: ExternalIMAPAccount[]}` |
+| `GET /api/mail/external-accounts` | 返回当前用户启用的账户，包含同样的认证状态字段 |
+| `POST /api/me/external-imap-oauth/{provider}/start` | `provider=gmail\|outlook`；请求 `{mailboxId?, accountId?, name?, email?, storageMode?, syncReadState?, enabled?}`，返回 `{url}` 并设置浏览器绑定 cookie。新账户必须提供自有 `mailboxId`；`accountId` 为可选重新授权目标，须属于当前用户、`authMode=oauth2` 且 provider 一致；他人/不存在账户返回 `404`，认证方式或 provider 不符返回 `400`。重新授权可省略 `mailboxId`，保留账户元数据。`email` 非空时须与授权身份邮箱一致，默认不使用本地邮箱地址。 |
+| `GET /api/external-imap-oauth/{provider}/callback` | provider 回调；无需登录会话，但须有未过期的一次性 state 和发起浏览器的绑定 cookie。使用 PKCE S256 和 OIDC nonce，校验 issuer/audience/expiry/subject；清除绑定 cookie，所有结果均 `302` 至 `{PublicBaseURL}/profile?tab=mailboxes&externalMail=<code>`，URL 不含原始错误。服务关闭时也以结果码返回。 |
+| `POST /api/me/external-imap-accounts/{id}` | OAuth 账户的 `host`、`port`、`tlsMode`、`username` 不可修改，变化返回 `400`，错误为 `oauth account endpoints cannot be changed`。允许修改 `name`、自有 `mailboxId`、`storageMode`、`syncReadState`、`enabled`；忽略 OAuth 账户的 `password`。 |
+| `POST /api/me/external-imap-accounts/{id}/test`、`/sync`、`/sync-folder` | `needs_reauth` 账户返回 `400` 和 `reauthorization required`，后台同步同样跳过。 |
+
+`ExternalIMAPAccount` 新增必有字段：
+
+- `authStatus`: `"ok"` 或 `"needs_reauth"`。刷新返回 `invalid_grant` 时要求重新授权；成功重新授权恢复 `ok` 并清空 `lastError`。
+- `providerPreset`: 新建 OAuth 账户为 `"gmail"` / `"outlook"`，其他及历史账户默认 `"custom"`；历史 OAuth 账户重新授权后补写 provider。
+
+账户继续返回 `id`、`mailboxId`、`name`、`host`、`port`、`tlsMode`、`username`、`authMode`、`oauthProvider?`、`oauthEmail?`、`oauthConfigured?`、`storageMode`、`syncReadState`、`enabled`、同步状态和时间字段；不返回密码、令牌、subject、generation 或 state 密文。
+
+固定回调结果码：
+
+| code | 含义 |
+|------|------|
+| `connected` | 新账户接入成功 |
+| `reauthorized` | 既有账户重新授权成功；subject 必须相同，历史无 subject 账户必须匹配原 OAuth 邮箱 |
+| `denied` | 已校验 state 的 provider 回调包含 `error` |
+| `invalid_state` | state 缺失、已使用、过期、provider 或绑定 cookie 不符 |
+| `email_mismatch` | 请求指定邮箱与授权邮箱不符 |
+| `account_mismatch` | 重新授权身份与既有账户不符，或目标账户已不存在/不再匹配 |
+| `exchange_failed` | code 换取令牌失败，或 token/OIDC 声明、返回 scope 校验失败 |
+| `not_configured` | 有效回调对应 provider 未配置，或外部 IMAP 已关闭 |
+| `failed` | 保存失败或授权期间目标邮箱已不可用 |
+
+Outlook 新授权 scope 包含 `https://outlook.office.com/SMTP.Send`；旧账户需要重新授权才能获得此 scope。该 scope 在 PR1 不开启发件功能。Gmail 使用 `https://mail.google.com/`，授权请求带 `access_type=offline`、`prompt=consent`。
+
+Schema 升至 V13（SQLite 同步补列）；原生 PostgreSQL/MySQL 备份使用 V13 清单，包含 OAuth state 表。原生恢复只接受当前 schema 版本，已有 V12 原生备份应先在对应 V12 版本恢复，再升级并重新备份；准备恢复安装时清除待回调 state，保持外部账户停用。
+
+## External SMTP sending / 第三方邮箱发件（PR2）
+
+仅浏览器会话接口支持外部账户发件（SMTP，含 XOAUTH2）；Open API `/api/open/v1/send` 不接受 `externalAccountId`。无 Gmail API / Microsoft Graph 发件通道。
+
+账户 JSON 新增必有字段：`sendEnabled: boolean`、`smtpHost: string`、`smtpPort: number`、`smtpTlsMode: "tls"|"starttls"|""`、`smtpUsername: string`、`smtpPasswordSet: boolean`、`sentCopyMode: "server"|"append"|"none"`、`sendAddress: string`、`canSend: boolean`。不返回任何密码、令牌或密文。OAuth 的 `sendAddress` 为 `oauth_email`；密码账户优先使用邮箱格式的 `smtp_username`，否则使用邮箱格式的 IMAP `username`，均无效则为空。`canSend` 需要账户启用、允许发件、`authStatus="ok"`、发件地址有效、SMTP 端点完整且采用 TLS。
+
+| Endpoint | 请求和响应 |
+|------|------|
+| `POST /api/me/external-imap-accounts` | 原 IMAP 创建字段之外，可提供 `sendEnabled?`（默认 false）、`smtpHost?`、`smtpPort?`、`smtpTlsMode?`、`smtpUsername?`、`smtpPassword?`、`sentCopyMode?`（新账户默认使用预设策略：gmail/outlook 为 server，其余为 append；已有账户不自动改变）。返回 `201 ExternalIMAPAccount`。 |
+| `POST /api/me/external-imap-accounts/{id}` | 上述 SMTP 字段均可选；省略保留原值。`smtpPassword` 为空保留原值，从未设置时使用 IMAP 密码；`smtpUsername` 为空时认证使用 IMAP username。返回 `200 ExternalIMAPAccount`。账户管理实际使用 POST，不是 PUT。 |
+| `POST /api/mail/send` | 原发送 payload 加 `externalAccountId?: string`。外部发送返回 `202 {"queued":true,"queueId":"snd_...","externalAccountId":"ximap_..."}`；本地发送仍返回 `201 MailMessage`。 |
+| `POST /api/mail/schedule-send` | 原定时 payload 加 `externalAccountId?: string`，保存至 payload JSON；创建和列表响应也含此字段。创建时校验，到点再次校验。账户被停用、取消发件或要求重新授权时，定时任务变为 failed。 |
+| `POST /api/mail/drafts`、`POST /api/mail/drafts/{id}` | 接受并校验 `externalAccountId?`。当前草稿存储尚不持久化或回读该字段，客户端重新打开草稿后需重新选择发件账户；定时发送独立完整保存该字段。 |
+| `GET /api/me/external-imap-accounts/{id}/sends?limit=20` | 仅所有者，返回 `{"items":[{"id":"snd_...","status":"queued","subject":"合成主题","recipients":["recipient@example.test"],"createdAt":"...","updatedAt":"...","lastError":"","sentCopyStatus":"none"}]}`。limit 范围 1–100；subject 在入队时从 MIME 头进行 RFC2047 解码、去除控制字符并截断为最多 300 个 Unicode 字符，列表只读 subject 列，不读取 MIME。 |
+| `POST /api/me/external-imap-accounts/{id}/sends/{sendId}/resolve` | 仅所有者，body `{"action":"delivered"|"retry"}`。仅 unconfirmed 状态有效；其他状态 `409`，他人或不存在对象 `404`。delivered 标记已投递；retry 代表用户接受可能重复发件并重新排队。成功返回 `200 {"ok":true}`。 |
+
+账户及发件记录路由均要求 `requireAuth`、`PermissionMailAccess` 和启用外部 IMAP；发送保留 `PermissionMailSend`，定时保留 `PermissionMailSchedule`，草稿保留 `PermissionMailDrafts`。外部账户必须属于当前用户，关联本次自有邮箱，启用且允许发件，认证正常且发件地址有效；共享用户一律拒绝。发送校验失败返回 `403 "external account cannot send"`。Header From、信封 MAIL FROM 均强制为 `sendAddress`，忽略请求的 from 和别名；显示名可来自 fromName 或账户 name，Message-ID 使用外部地址域名。仍执行附件、收件人上限和 SMTP 配额校验；外部发件不写本地 Sent，也不进行本地投递。
+
+密码账户开启发件时，SMTP 端点必须完整；仅允许 `tls` 或 `starttls`，最低 TLS1.2。错误文本分别为 `external smtp settings are incomplete`、`external smtp requires tls`、`external send address is invalid`。主机复用 IMAP 的 SSRF 检查与连接时 IP 复查；默认拒绝私网。既有 `LANQIN_EXTERNAL_IMAP_ALLOW_PRIVATE_HOSTS` 仅用于明确允许的私有部署，同时作用于 IMAP/SMTP。凭据仅发往账户保存的端点。
+
+OAuth callback 新建及重新授权固定保存 Gmail `smtp.gmail.com:465 tls`、Outlook `smtp.office365.com:587 starttls`。SMTP 端点、用户名及 SMTP 密码不可改，修改返回 `400 "oauth account endpoints cannot be changed"`；SMTP 相关可修改项仅 `sendEnabled` 和 `sentCopyMode`。默认 `sentCopyMode=server`。
+
+队列状态直接使用 `queued|sending|delivered|failed|unconfirmed|canceled`，无 sent→delivered 名称映射。DATA 之前 4xx/网络错误退避重试，5xx 永久失败；DATA Close 的明确 SMTP 错误码按 4xx/5xx 处理，网络或超时进入 unconfirmed，不自动重试。DATA 成功后 QUIT 失败仍视为 delivered。崩溃后无法确认结果的外部发送租约也进入 unconfirmed。账户删除时，同一事务把该账户 queued/可重试 failed 行设为永久失败，`lastError="external account removed"`。外部路由永不回退中继，即使全局 SMTP 未配置也会处理。
+
+外部 SMTP 的 `lastError` 仅使用以下稳定错误码（删除账户的指定文本除外）：
+
+- `external_smtp_auth_disabled`：535 且增强码为 5.7.139，或消息包含 SmtpClientAuthentication is disabled（不区分大小写）。普通 535（包括 5.7.3、5.7.30）为 external_smtp_auth_failed。
+- `external_smtp_auth_failed`：认证永久失败。
+- `external_smtp_rejected`：其他 5xx 永久拒绝。
+- `external_smtp_temporary`：可重试失败。
+- `external_smtp_unconfirmed`：投递结果不确定，需所有者确认。
+- `external_account_unavailable`：账户不存在或不可发，永久失败。
+- `external_reauthorization_required`：OAuth invalid_grant，需重新授权。
+
+`sentCopyMode=server|none` 时 `sentCopyStatus=none`；append 在 SMTP 成功或用户确认 delivered 后置 pending，独立以 IMAP APPEND 写入带 `\Sent` special-use 的文件夹，缺失时查找常见 Sent/已发送等文件夹。最多尝试三次，成功 done、耗尽 failed；副本失败绝不重发 SMTP。计数 `sent_copy_attempt_count` 与既有队列租约共同持久化，计数和 subject 列均并入尚未发布的 V13，已发布 V12 可直接升级；原生备份 schema 版本为 13。SMTP 与副本状态独立，delivered 不保证副本成功。列表读取 subject 列；完整 MIME 仅在发送、重试、待确认或待处理 APPEND 时保留，处理结束后清理，详见下方保留策略。
+
+管理端 `GET /api/admin/delivery-queue` 的条目新增 `route:"relay"|"external"`（非 send 任务为 relay），status 筛选支持 unconfirmed。管理员 retry unconfirmed 返回 `409`，只有所有者可通过 resolve 确认；其他外部任务 retry 保留 external 路由。原生备份恢复保留 unconfirmed 状态，不将其自动重排队。
+
+
+## 第三方邮箱服务商预设（PR3）
+
+`GET /api/me/external-mail-providers` 使用与 `/me/external-imap-accounts` 相同的会话认证、`PermissionMailAccess` 和外部 IMAP 启用中间件。返回 `200`：
+
+```json
+{"items":[{"id":"gmail","name":"Gmail","authMethods":["oauth2","app_password"],"oauthProvider":"gmail","oauthConfigured":true,"imapHost":"imap.gmail.com","imapPort":993,"imapTlsMode":"tls","smtpHost":"smtp.gmail.com","smtpPort":465,"smtpTlsMode":"tls","sentCopyMode":"server","requiresImapId":false}]}
+```
+
+`items` 按 gmail、outlook、yahoo、icloud、qq、163、custom 顺序返回完整七项；示例仅展示 Gmail。`authMethods` 只含 `oauth2`、`app_password`（custom 的该值也涵盖普通密码）。Gmail 同时支持两种，Outlook 只推荐 oauth2，其余只推荐 app_password。`oauthProvider` 为 gmail、outlook 或空字符串；`oauthConfigured` 仅在对应管理员 Client ID 和 Client Secret 均已配置时为 true，其余提供商为 false，不返回任何客户端密钥。custom 的两种 host 都为空字符串、两种 port 都为 0，TLS 模式默认 tls。端点和配置步骤见 [第三方邮箱指南](external-mail.md)。
+
+创建和更新外部账户新增可选 `providerPreset`，只接受上述七个 id；未知值返回 `400 {"error":"unknown mail provider"}`。创建省略或空值默认为 custom；更新省略保留原值（密码账户显式空值重置为 custom）。选择预设不会覆盖密码账户提交的 IMAP/SMTP 端点，也不会自动变更已有发件副本策略。OAuth 创建/重新授权自动保存相应 provider；OAuth 更新省略 preset 使用其 oauth provider，显式提供的值必须等于该 provider，否则返回 `400 {"error":"oauth account provider does not match"}`，未知值仍返回 unknown mail provider。`ExternalIMAPAccount.providerPreset` 继续返回已存值。
+
+163 预设的 `requiresImapId=true`，其他为 false。登录成功后，163 预设或主机为 imap.163.com、imap.126.com、imap.yeah.net 时，服务器若声明 ID 能力则发送 RFC 2971 ID，仅包含 name/vendor=LanQin、version=1；失败记录警告并继续使用会话。
+
+发件内容保留策略：外部 send_queue 仅在 queued、sending、可重试 failed、unconfirmed 或 sent_copy_status=pending 时保留 mime_base64。投递完成且无待处理 APPEND、APPEND done/failed、用户 resolve delivered 且无待处理 APPEND、永久失败及取消时清空 MIME。主题仍保存在 V13 的 subject 列。MIME 已清理的永久失败记录不能管理员重试，返回 `409 delivery queue item is no longer eligible`，需重新撰写；结果待确认仍保留 MIME 以便显式 retry。原生备份准备会保留 unconfirmed 的状态与内容，取消的外部队列内容会清理。V13 同时包含 subject 和 sent_copy_attempt_count，不使用 V14。
